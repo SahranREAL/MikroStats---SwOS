@@ -1,5 +1,8 @@
 # MikroStats
 
+<img width="1721" height="566" alt="image" src="https://github.com/user-attachments/assets/5cf93ba8-c889-44fd-acec-fd1fbaff5681" />
+
+
 Dashboard de supervision temps réel pour switch **MikroTik SwOS**, conçu pour
 tourner en permanence sur du matériel modeste (Orange Pi, RPi, vieux NUC).
 
@@ -14,7 +17,6 @@ tourner en permanence sur du matériel modeste (Orange Pi, RPi, vieux NUC).
 ## Installation
 
 ```bash
-cd /media/loris/projets/MikroStats
 npm install --omit=dev          # better-sqlite3 est natif : voir "ARM" plus bas
 ```
 
@@ -183,7 +185,3 @@ switch compte les mêmes octets en RX sur le port qui les reçoit et en TX sur
 celui qui les transmet, et deux machines qui se parlent donnent exactement ce
 signal. Ce n'est un problème que si ce trafic apparaît sur des ports où rien
 n'est branché, ou s'il ne s'arrête jamais.
-
-## Licence
-
-ISC

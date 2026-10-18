@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>MikroTik SwOS Monitor</title>
+<link rel="stylesheet" href="/styles.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%230b1220'/%3E%3Cpath d='M2 10l3-4 3 3 3-5 3 4' stroke='%233b82f6' stroke-width='1.5' fill='none' stroke-linejoin='round'/%3E%3C/svg%3E">
+</head>
+<body>
+
+<header class="hdr">
+  <div class="hdr-id">
+    <h1>MikroTik SwOS Monitor</h1>
+    <div class="hdr-meta">
+      <span>Switch&nbsp;: <b id="hdr-switch">-</b></span>
+      <span>IP&nbsp;: <b id="hdr-ip">-</b></span>
+    </div>
+  </div>
+  <div class="hdr-status">
+    <div class="hdr-last">
+      <span class="k">Last update</span>
+      <span class="v" id="hdr-update">-</span>
+    </div>
+    <div class="hdr-last">
+      <span class="k">Polling</span>
+      <span class="v" id="hdr-poll">-</span>
+    </div>
+    <div class="conn" id="hdr-conn" data-state="disconnected">
+      <span class="dot"></span>
+      <span id="hdr-conn-text">Connecting</span>
+    </div>
+  </div>
+</header>
+
+<div class="banner" id="banner" hidden>
+  <span class="banner-title" id="banner-title">Switch inaccessible</span>
+  <span class="banner-body" id="banner-body"></span>
+  <span class="banner-spin"><span class="retry-dot"></span> Retrying&hellip;</span>
+</div>
+
+<main>
+  <section class="kpis" id="kpis">
+    <div class="kpi" title="Somme des 26 ports. Un meme paquet est compt&eacute; en IN sur le port qui le re&ccedil;oit et en OUT sur le port qui le transmet : un t&eacute;l&eacute;chargement donne donc IN = OUT. Utilisez la vue par port pour voir le sens r&eacute;el.">
+      <div class="kpi-k">Total IN</div>
+      <div class="kpi-v in" id="kpi-in">-</div>
+      <div class="kpi-s" id="kpi-in-avg">avg -</div>
+    </div>
+    <div class="kpi" title="Somme des 26 ports. Pour un flux qui traverse le switch, IN et OUT valent la m&ecirc;me valeur : c'est normal, pas une mesure erron&eacute;e.">
+      <div class="kpi-k">Total OUT</div>
+      <div class="kpi-v out" id="kpi-out">-</div>
+      <div class="kpi-s" id="kpi-out-avg">avg -</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-k">Peak IN</div>
+      <div class="kpi-v in" id="kpi-in-max">-</div>
+      <div class="kpi-s" id="kpi-in-max-at">-</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-k">Peak OUT</div>
+      <div class="kpi-v out" id="kpi-out-max">-</div>
+      <div class="kpi-s" id="kpi-out-max-at">-</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-k">RX Total</div>
+      <div class="kpi-v" id="kpi-rx-total">-</div>
+      <div class="kpi-s">cumulé switch</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-k">TX Total</div>
+      <div class="kpi-v" id="kpi-tx-total">-</div>
+      <div class="kpi-s">cumulé switch</div>
+    </div>
+    <div class="kpi">
+      <div class="kpi-k">Ports actifs</div>
+      <div class="kpi-v ok" id="kpi-ports-up">-</div>
+      <div class="kpi-s" id="kpi-ports-down">-</div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-hd">
+      <div>
+        <h2>Trafic global du switch</h2>
+        <div class="panel-sub">Historique&nbsp;: <b id="range-label">5 min</b> &middot; somme des 26 ports</div>
+      </div>
+      <div class="panel-tools">
+        <div class="legend">
+          <span class="lg"><i class="sw in"></i>IN / RX</span>
+          <span class="lg"><i class="sw out"></i>OUT / TX</span>
+        </div>
+        <div class="range" id="range-btns" role="group" aria-label="Période"></div>
+        <div class="zoom" id="zoom-tools" hidden>
+          <button type="button" data-zoom="in" title="Zoom avant">+</button>
+          <button type="button" data-zoom="out" title="Zoom arrière">&minus;</button>
+          <button type="button" data-zoom="reset" title="Vue complète">reset</button>
+        </div>
+      </div>
+    </div>
+    <div class="readout">
+      <div class="ro in"><span class="ro-k">IN</span><span class="ro-v" id="ro-in">-</span></div>
+      <div class="ro out"><span class="ro-k">OUT</span><span class="ro-v" id="ro-out">-</span></div>
+      <div class="ro in"><span class="ro-k">IN max</span><span class="ro-v" id="ro-in-max">-</span></div>
+      <div class="ro out"><span class="ro-k">OUT max</span><span class="ro-v" id="ro-out-max">-</span></div>
+    </div>
+    <div class="chart-wrap chart-lg"><canvas id="chart-global"></canvas></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-hd">
+      <div>
+        <h2>Statistiques des ports</h2>
+        <div class="panel-sub" id="ports-sub">-</div>
+      </div>
+      <div class="panel-tools">
+        <label class="chk"><input type="checkbox" id="only-active"> Ports actifs uniquement</label>
+      </div>
+    </div>
+    <div class="ports" id="ports-grid"></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-hd">
+      <div>
+        <h2>Tableau des ports</h2>
+        <div class="panel-sub">Cliquez sur un en-tête pour trier</div>
+      </div>
+      <div class="panel-tools"><input type="search" id="table-filter" placeholder="Filtrer un port" aria-label="Filtrer un port"></div>
+    </div>
+    <div class="table-scroll">
+      <table id="port-table">
+        <thead>
+          <tr>
+            <th data-sort="port" class="num">Port</th>
+            <th data-sort="link">Status</th>
+            <th data-sort="inBps" class="num">IN</th>
+            <th data-sort="outBps" class="num">OUT</th>
+            <th data-sort="totalBps" class="num">Total</th>
+            <th data-sort="inPeak" class="num">Peak IN</th>
+            <th data-sort="outPeak" class="num">Peak OUT</th>
+            <th data-sort="rxBytes" class="num">RX Total</th>
+            <th data-sort="txBytes" class="num">TX Total</th>
+            <th data-sort="linkSpeed" class="num">Lien</th>
+          </tr>
+        </thead>
+        <tbody id="port-tbody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-hd"><div><h2>System Status</h2></div></div>
+    <div class="sysgrid" id="sysgrid"></div>
+  </section>
+</main>
+
+<div class="modal" id="modal" hidden>
+  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal-hd">
+      <h3 id="modal-title">Port</h3>
+      <button type="button" id="modal-close" aria-label="Fermer">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-facts" id="modal-facts"></div>
+      <div class="modal-hd2">
+        <h4>Historique du port</h4>
+        <div class="range" id="modal-range" role="group" aria-label="Période du port"></div>
+      </div>
+      <div class="chart-wrap chart-md"><canvas id="chart-port"></canvas></div>
+    </div>
+  </div>
+</div>
+
+<footer class="foot">
+  <span id="foot-version">-</span>
+  <span id="foot-store">-</span>
+</footer>
+
+<script src="/vendor/chart.umd.js"></script>
+<script src="/vendor/hammer.min.js"></script>
+<script src="/vendor/chartjs-plugin-zoom.min.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

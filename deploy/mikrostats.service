@@ -1,0 +1,58 @@
+[Unit]
+Description=MikroStats - MikroTik SwOS monitoring dashboard
+Documentation=file:/media/loris/projets/MikroStats/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mikrostats
+Group=mikrostats
+WorkingDirectory=/media/loris/projets/MikroStats
+ExecStart=/usr/bin/node server.js
+
+# Credentials for the switch: never hardcode them in this file.
+# Create once with:  install -m 600 -o mikrostats /dev/null /etc/mikrostats.env
+# then:             nano /etc/mikrostats.env
+EnvironmentFile=-/etc/mikrostats.env
+
+Environment=NODE_ENV=production
+Environment=PORT=3000
+
+# The process manages its own lifecycle and flushes SQLite on SIGTERM, so give
+# it long enough to finish, then insist.
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+Restart=always
+RestartSec=5
+# Do not give up: this is a monitoring tool, it should always come back.
+StartLimitIntervalSec=0
+
+# ---- Hardening ----
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=no
+SystemCallArchitectures=native
+# ReadWritePaths must list every directory the app writes to.
+ReadWritePaths=/media/loris/projets/MikroStats/data /media/loris/projets/MikroStats/logs
+
+# ---- Resource limits (Orange Pi class hardware) ----
+MemoryMax=256M
+TasksMax=64
+
+# ---- Logging: the app has its own rotating log, so keep journald quiet ----
+StandardOutput=null
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

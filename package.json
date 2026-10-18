@@ -1,0 +1,34 @@
+{
+  "name": "mikrostats",
+  "version": "1.0.0",
+  "description": "Lightweight real-time monitoring dashboard for MikroTik SwOS switches",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/run.js",
+    "test:unit": "node test/unit.test.js",
+    "test:retention": "node test/retention.test.js",
+    "test:flush": "node test/flush.test.js",
+    "test:transit": "node test/transit.test.js",
+    "test:ui": "node test/ui.test.js",
+    "soak": "node test/soak.js 4 --sim"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "mikrotik",
+    "swos",
+    "monitoring",
+    "dashboard"
+  ],
+  "license": "ISC",
+  "dependencies": {
+    "better-sqlite3": "^12.11.1",
+    "digest-fetch": "^3.1.1",
+    "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "jsdom": "^29.1.1"
+  }
+}

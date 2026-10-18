@@ -4,6 +4,9 @@ Un tableau de bord léger et intuitif pour suivre l'utilisation de votre bande p
 
 ## Aperçu
 
+<img width="1899" height="944" alt="image" src="https://github.com/user-attachments/assets/b01d7eab-75cd-4298-917f-4da50b5b463c" />
+
+
 MikroStats vous permet d'obtenir un graphique en temps réel ainsi que des statistiques clés sur l'utilisation de la bande passante de vos équipements réseau, directement depuis une interface claire.
 
 ## Prérequis

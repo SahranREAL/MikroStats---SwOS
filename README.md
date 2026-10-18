@@ -30,8 +30,13 @@ MikroStats vous permet d'obtenir un graphique en temps réel ainsi que des stati
 
 ## Configuration
 
-La configuration s'effectue directement via le fichier `.env` situé à la racine du projet. Assurez-vous d'y renseigner les informations de connexion de votre switch (adresse IP, identifiants) ainsi que les autres paramètres demander.
+La configuration s'effectue actuellement dans le fichier config.js. Vous devez y modifier l'adresse IP du switch (host), ainsi que renseigner le nom d'utilisateur (username) et le mot de passe (password).
+
+## Update :
+
+- Prise en charge d'un fichier .env pour la gestion des variables d'environnement.
+
+- Interface web de configuration initiale lors du premier démarrage de l'application.
 
 ---
-
 *Remarque : Le dépôt pour la version **MikroStats RouterOS** sera disponible prochainement.*

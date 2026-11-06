@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master, Dev-Branch]
+  pull_request:
+
+jobs:
+  test:
+    name: Node ${{ matrix.node-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 26 is the LTS we target (engines.node >= 26); 27 catches upcoming
+        # deprecations before they hit the LTS line.
+        node-version: [26, 27]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - name: Install (production deps only for the runtime check)
+        run: npm ci
+
+      - name: Dependency audit
+        run: npm audit --audit-level=high
+
+      - name: Unit, history and transit suites
+        run: npm test
+
+      - name: Boot the server without deprecation warnings
+        run: |
+          set -euo pipefail
+          PORT=3123 DATA_DIR="$RUNNER_TEMP/ms-data" LOG_TARGET=stdout \
+            node --throw-deprecation server.js > "$RUNNER_TEMP/boot.log" 2>&1 &
+          pid=$!
+          for i in $(seq 1 30); do
+            if curl -fsS "http://127.0.0.1:3123/api/status" > /dev/null; then break; fi
+            sleep 1
+          done
+          curl -fsS "http://127.0.0.1:3123/api/status"
+          kill "$pid"
+          wait "$pid" || true
+          cat "$RUNNER_TEMP/boot.log"
+          if grep -qi "deprecat" "$RUNNER_TEMP/boot.log"; then
+            echo "deprecation warning found" >&2
+            exit 1
+          fi
+
+  ui:
+    name: UI smoke (jsdom)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: npm
+      - run: npm ci
+      - name: Start server
+        run: |
+          PORT=3000 DATA_DIR="$RUNNER_TEMP/ms-data" LOG_TARGET=stdout \
+            node server.js > "$RUNNER_TEMP/server.log" 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -fsS "http://127.0.0.1:3000/api/status" > /dev/null; then break; fi
+            sleep 1
+          done
+      - name: Run the UI suite against the live server
+        run: node --test test/ui.test.js
+
+  docker:
+    name: Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: mikrostats:ci

@@ -1,0 +1,8 @@
+node_modules
+logs
+data
+.git
+*.log
+*.csv
+.env
+newfront.html

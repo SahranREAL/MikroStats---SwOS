@@ -1,16 +1,17 @@
-'use strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+import express from 'express';
 
-const fs = require('fs');
-const path = require('path');
-const crypto = require('crypto');
-const express = require('express');
+import config from './config.js';
+import logger from './lib/logger.js';
+import { HistoryStore, GLOBAL_PORT } from './lib/history.js';
+import { Poller } from './lib/poller.js';
+import { SseHub } from './lib/sse.js';
+import * as alerts from './lib/alerts.js';
 
-const config = require('./config');
-const logger = require('./lib/logger');
-const { Store, GLOBAL_PORT } = require('./lib/store');
-const { Poller } = require('./lib/poller');
-const { SseHub } = require('./lib/sse');
-const alerts = require('./lib/alerts');
+const pkg = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'package.json'), 'utf8'));
 
 /* ------------------------------------------------------------------ ranges */
 
@@ -24,8 +25,6 @@ const RANGES = {
   '30d': 30 * 24 * 60 * 60e3,
 };
 const RANGE_KEYS = Object.keys(RANGES);
-// Ranges the RAM ring can satisfy on its own (1h of @3s live samples).
-const RAM_RANGES = new Set(['5m', '15m', '1h']);
 
 function parseRange(value) {
   const key = typeof value === 'string' ? value.trim().toLowerCase() : '';
@@ -45,20 +44,13 @@ function parsePort(value) {
 
 /* -------------------------------------------------------------------- boot */
 
-const store = new Store();
-let poller = null;
+const store = new HistoryStore();
+store.loadAll();
+
+const poller = new Poller(store);
 const sse = new SseHub();
 let server = null;
 let shuttingDown = false;
-
-try {
-  store.open();
-} catch (err) {
-  logger.error('fatal: cannot open history database:', err);
-  process.exit(1);
-}
-
-poller = new Poller(store);
 
 /* ------------------------------------------------------------------ express */
 
@@ -81,8 +73,8 @@ app.use((req, res, next) => {
 });
 
 // Optional shared secret (opt-in via DASHBOARD_TOKEN). Constant-time compare.
-if (config.token) {
-  const expected = Buffer.from(String(config.token));
+if (config.auth.token) {
+  const expected = Buffer.from(String(config.auth.token));
   app.use('/api', (req, res, next) => {
     const header = req.get('authorization') || '';
     const provided = Buffer.from(header.startsWith('Bearer ') ? header.slice(7) : '');
@@ -101,36 +93,30 @@ api.use((_req, res, next) => {
   next();
 });
 
-/** Real-time snapshot. Never triggers a switch request. */
+/** Real-time snapshot. Never triggers a device request. */
 api.get('/stats', (_req, res) => {
-  const payload = poller.statsPayload();
-  res.json({ success: true, ...payload });
+  res.json({ success: true, ...poller.statsPayload() });
 });
 
-/** System / switch health. */
+/** System / device health. */
 api.get('/status', (_req, res) => {
   // This tool is expected to run on small hardware forever, so surface the
   // resources it actually consumes instead of making the operator guess.
   const mem = process.memoryUsage();
+  const health = store.health();
   res.json({
     success: true,
     ...poller.statusSnapshot(),
-    store: store.health(),
+    history: health,
     sseClients: sse.size,
     alerts: alerts.active(),
-    ram: {
-      maxPoints: config.ram.maxPoints,
-      globalPoints: poller.globalRing.size,
-      portPoints: poller.portRing ? poller.portRing.size : 0,
-      series: poller.portRing ? poller.portRing.fields : 0,
-    },
     process: {
       rssMb: +(mem.rss / 1048576).toFixed(1),
       heapUsedMb: +(mem.heapUsed / 1048576).toFixed(1),
       uptimeSec: Math.round(process.uptime()),
-      dbMb: store.dbSizeMb(),
+      historyMb: +(health.bytes / 1048576).toFixed(2),
     },
-    version: require('./package.json').version,
+    version: pkg.version,
     node: process.version,
   });
 });
@@ -156,8 +142,9 @@ function statsFromSeries(series) {
 }
 
 /**
- * History. `range` picks the window, `port` picks a port (0/absent = switch).
- * Served from RAM for the last hour, from SQLite beyond that, always downsampled.
+ * History. `range` picks the window, `port` picks a port (0/absent = device).
+ * Served entirely from the in-memory tiers, always downsampled: no disk read
+ * ever happens inside this handler.
  */
 api.get('/history', (req, res) => {
   const range = parseRange(req.query.range);
@@ -173,28 +160,13 @@ api.get('/history', (req, res) => {
 
   const to = Date.now();
   const from = to - range.ms;
-  const maxPoints = config.store.maxPointsPerResponse;
+  const maxPoints = config.history.maxPointsPerResponse;
 
-  let series;
-  if (RAM_RANGES.has(range.key)) {
-    series = port === GLOBAL_PORT
-      ? poller.ramSeries({ from, to, maxPoints })
-      : poller.ramPortSeries({ port, from, to, maxPoints: Math.min(maxPoints, 300) });
-  } else {
-    series = store.query({ port, from, to, maxPoints });
-  }
-
-  // Prefer the cheap RAM/database aggregate; fall back to the returned series so
-  // the UI always has current/avg/max for the exact window it is displaying.
-  let stats = port === GLOBAL_PORT && RAM_RANGES.has(range.key)
-    ? poller.ramStats(range.ms)
-    : store.statsForRange({ port, from, to });
-  if (!stats) stats = statsFromSeries(series);
+  const series = poller.series({ port, from, to, maxPoints });
+  const stats = poller.seriesStats({ port, from, to }) || statsFromSeries(series);
 
   // Global request also returns every port's peak, so 26 cards need 1 request.
-  const peaks = port === GLOBAL_PORT
-    ? (RAM_RANGES.has(range.key) ? poller.ramPeaks() : store.peaksForRange({ from, to }))
-    : null;
+  const peaks = port === GLOBAL_PORT ? poller.peaks({ from, to }) : null;
 
   res.json({
     success: true,
@@ -273,7 +245,7 @@ const staticOpts = {
     }
   },
 };
-app.use(express.static(path.join(config.publicDir), staticOpts));
+app.use(express.static(config.publicDir, staticOpts));
 
 // Final safety net: an unexpected error must not take the process down.
 app.use((err, _req, res, _next) => {
@@ -287,7 +259,7 @@ app.use((err, _req, res, _next) => {
 /**
  * Feed the alert engine. Safe to call on every sample and on every status
  * change: the engine de-duplicates, and evaluating on status change is what
- * makes "switch unreachable" fire while there is no sample to evaluate at all.
+ * makes "device unreachable" fire while there is no sample to evaluate at all.
  */
 function runAlerts(context) {
   alerts.evaluate(context).then((events) => {
@@ -340,7 +312,7 @@ poller.on('statusChange', (change) => {
 
 server = app.listen(config.http.port, config.http.host, () => {
   logger.info(`listening on http://${config.http.host}:${config.http.port}`);
-  logger.info(`switch ${config.switch.name} (${config.switch.host}), poll ${config.poll.intervalMs}ms, retention tiers ${JSON.stringify(config.store.tiers.map((t) => t.res + 's'))}`);
+  logger.info(`device ${config.legacy.name} (${config.legacy.host}), poll ${config.poll.defaultIntervalMs}ms, tiers ${config.history.tiers.map((t) => t.res + 's').join('/')}`);
   store.startTimers();
   poller.start();
 });
@@ -370,9 +342,8 @@ function shutdown(signal) {
   // 1. Stop producing data before anything else.
   try { poller.stop(); } catch (err) { logger.warn('poller stop failed:', err.message); }
 
-  // 2. Persist and checkpoint the database IMMEDIATELY. This must not wait for
-  //    HTTP connections to drain, otherwise a long-lived SSE client keeps the
-  //    last samples stuck in the WAL.
+  // 2. Persist history IMMEDIATELY. This must not wait for HTTP connections to
+  //    drain, otherwise a long-lived SSE client keeps the last samples pending.
   try { store.close(); } catch (err) { logger.warn('store close failed:', err.message); }
 
   // 3. Release the long-lived responses that would otherwise block server.close().
@@ -394,8 +365,8 @@ function shutdown(signal) {
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
-// Process-level safety net (§28, §30). A monitoring tool that dies with its
-// process is useless: log and keep serving. Only unrecoverable state exits.
+// Process-level safety net. A monitoring tool that dies with its process is
+// useless: log and keep serving. Only unrecoverable state exits.
 process.on('uncaughtException', (err) => {
   logger.error('uncaught exception:', err && err.stack ? err.stack : err);
 });
@@ -405,4 +376,4 @@ process.on('unhandledRejection', (reason) => {
 
 process.on('exit', () => logger.close());
 
-module.exports = { app, poller, store, sse };
+export { app, poller, store, sse };

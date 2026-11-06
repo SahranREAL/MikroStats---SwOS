@@ -9,7 +9,9 @@ Type=simple
 User=mikrostats
 Group=mikrostats
 WorkingDirectory=/media/loris/projets/MikroStats
-ExecStart=/usr/bin/node server.js
+# Node 26 (Lithium) is required; /usr/local/bin/node is the NodeSource/NVM
+# install. Falls back to /usr/bin/node when the package manager provides >= 26.
+ExecStart=/usr/local/bin/node server.js
 
 # Credentials for the switch: never hardcode them in this file.
 # Create once with:  install -m 600 -o mikrostats /dev/null /etc/mikrostats.env
@@ -19,8 +21,8 @@ EnvironmentFile=-/etc/mikrostats.env
 Environment=NODE_ENV=production
 Environment=PORT=3000
 
-# The process manages its own lifecycle and flushes SQLite on SIGTERM, so give
-# it long enough to finish, then insist.
+# The process manages its own lifecycle and flushes the history journal on
+# SIGTERM, so give it long enough to finish, then insist.
 KillSignal=SIGTERM
 TimeoutStopSec=20
 

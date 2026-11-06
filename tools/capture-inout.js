@@ -24,10 +24,8 @@
  *
  * Start it, then run the speedtest while it records.
  */
-'use strict';
-
-const fs = require('fs');
-const path = require('path');
+import fs from 'node:fs';
+import path from 'node:path';
 
 const BASE = process.env.CAPTURE_BASE || 'http://127.0.0.1:3000';
 const SECONDS = Number(process.argv[2]) || 60;

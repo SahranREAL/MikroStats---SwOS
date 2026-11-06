@@ -3,13 +3,13 @@
  * jsdom against a live backend, then exercises the UI paths (range switch, port
  * modal, table sort, SSE) looking for runtime errors.
  */
-const fs = require('fs');
-const os = require('os');
-const path = require('path');
-const ROOT = path.resolve(__dirname, '..');
-const { JSDOM, VirtualConsole } = require('jsdom');
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { JSDOM, VirtualConsole } from 'jsdom';
 
-const BASE = 'http://127.0.0.1:3000';
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const BASE = process.env.UI_BASE || 'http://127.0.0.1:3000';
 
 const errors = [];
 const logs = [];
@@ -47,8 +47,8 @@ async function run() {
     set lineJoin(v) {}, set font(v) {}, set textBaseline(v) {}, set globalAlpha(v) {},
   });
   window.HTMLCanvasElement.prototype.getContext = function () { return ctxStub(); };
-  window.HTMLCanvasElement.prototype.clientWidth = 200;
-  window.HTMLCanvasElement.prototype.clientHeight = 54;
+  Object.defineProperty(window.HTMLCanvasElement.prototype, 'clientWidth', { configurable: true, get: () => 200 });
+  Object.defineProperty(window.HTMLCanvasElement.prototype, 'clientHeight', { configurable: true, get: () => 54 });
   window.devicePixelRatio = 1;
 
   const chartInstances = [];
@@ -269,8 +269,12 @@ async function run() {
   cards[0].dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
   await new Promise((r) => setTimeout(r, 2000));
   check('modal open', doc.getElementById('modal').hidden === false);
-  check('modal title', /Port1/.test(doc.getElementById('modal-title').textContent),
-    doc.getElementById('modal-title').textContent);
+  // Port names come from the switch (WAN, Bureaux, ...) so assert against the
+  // live payload instead of a hardcoded "Port1".
+  const firstName = (liveStats.ports.find((p) => p.port === 1) || {}).name || 'Port1';
+  check('modal title matches the port name',
+    doc.getElementById('modal-title').textContent.includes(firstName),
+    `${doc.getElementById('modal-title').textContent} (expected ${firstName})`);
   const facts = doc.getElementById('modal-facts').textContent;
   check('modal shows status', facts.includes('UP'));
   check('modal shows peak', facts.includes('Peak IN') && facts.includes('Peak OUT'));
@@ -291,14 +295,25 @@ async function run() {
   check('modal closed', doc.getElementById('modal').hidden === true);
 
   // filter + only-active
+  const allRows = doc.querySelectorAll('#port-tbody tr').length;
   const filt = doc.getElementById('table-filter');
   filt.value = 'port2';
   filt.dispatchEvent(new window.Event('input', { bubbles: true }));
   await new Promise((r) => setTimeout(r, 200));
-  check('table filter works (port2 -> Port2,Port20-24 = 6)', doc.querySelectorAll('#port-tbody tr').length === 6,
-    String(doc.querySelectorAll('#port-tbody tr').length));
+  const filtered = Array.from(doc.querySelectorAll('#port-tbody tr'));
+  // Port names come from the switch, so assert the invariant (every shown row
+  // matches the query, and the table did narrow) rather than an exact count.
+  const q = 'port2';
+  const allMatch = filtered.length > 0 && filtered.length < allRows
+    && filtered.every((tr) => tr.textContent.toLowerCase().includes(q));
+  check('table filter narrows to matching rows', allMatch,
+    `${filtered.length}/${allRows} rows for "${q}"`);
   filt.value = '';
   filt.dispatchEvent(new window.Event('input', { bubbles: true }));
+  await new Promise((r) => setTimeout(r, 200));
+  check('clearing the filter restores every row',
+    doc.querySelectorAll('#port-tbody tr').length === allRows,
+    `${doc.querySelectorAll('#port-tbody tr').length} vs ${allRows}`);
 
   const oa = doc.getElementById('only-active');
   oa.checked = true;

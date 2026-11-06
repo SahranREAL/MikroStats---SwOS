@@ -7,10 +7,13 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch --env-file-if-exists=.env server.js",
-    "test": "node --test test/unit.test.js test/history.test.js test/transit.test.js",
-    "test:all": "node --test test/",
+    "test": "node --test test/unit.test.js test/history.test.js test/transit.test.js test/topology.test.js test/linkrates.test.js",
+    "test:all": "node --test test/unit.test.js test/history.test.js test/transit.test.js test/topology.test.js test/linkrates.test.js test/api.test.js",
     "test:unit": "node --test test/unit.test.js",
     "test:history": "node --test test/history.test.js",
+    "test:topology": "node --test test/topology.test.js",
+    "test:linkrates": "node --test test/linkrates.test.js",
+    "test:api": "node --test test/api.test.js",
     "test:ui": "node --test test/ui.test.js",
     "soak": "node test/soak.js 4 --sim"
   },

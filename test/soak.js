@@ -28,36 +28,41 @@ const INTERVAL = SIM ? 1000 : config.poll.defaultIntervalMs;
 const store = new HistoryStore();
 store.startTimers();
 
-const poller = new Poller(store, { id: 'soak' });
-if (SIM) {
-  // Synthetic counters: a random walk, so aggregation is testable without
-  // depending on real traffic.
+/** Synthetic driver: a random walk, testable without real traffic. */
+function simDriver() {
   let rx = 1e12;
   let tx = 1e12;
-  poller.client.fetchStats = async () => {
-    const n = 26;
-    const rb = new Array(n).fill(0);
-    const tb = new Array(n).fill(0);
-    const rbh = new Array(n).fill(0);
-    const tbh = new Array(n).fill(0);
-    rb[0] = (rx % 4294967296) >>> 0; rbh[0] = Math.floor(rx / 4294967296);
-    tb[0] = (tx % 4294967296) >>> 0; tbh[0] = Math.floor(tx / 4294967296);
-    return { rb, rbh, tb, tbh };
+  const N = 26;
+  return {
+    host: 'sim.test',
+    device: { name: 'soak' },
+    async listPorts() {
+      return Array.from({ length: N }, (_, i) => ({
+        index: i + 1, name: `Port${i + 1}`, link: true, speed: 1e9, duplex: 'full', sfp: false,
+      }));
+    },
+    async readCounters() {
+      const ports = [{ index: 1, rxBytes: rx, txBytes: tx }];
+      for (let i = 2; i <= N; i++) ports.push({ index: i, rxBytes: 0, txBytes: 0 });
+      return { t: Date.now(), ports };
+    },
+    bump() {
+      rx += Math.random() * 40e6;   // 0..320 Mbit bursts
+      tx += Math.random() * 12e6;
+    },
   };
-  const bump = () => {
-    rx += Math.random() * 40e6;   // 0..320 Mbit bursts
-    tx += Math.random() * 12e6;
-  };
-  setInterval(bump, 1000).unref();
-  poller.client.fetchLinks = async () => {
-    poller.client.linksAt = Date.now();
-    return poller.client.links || {
-      prt: 26, sfpo: 24, spd: new Array(26).fill(2),
-      nm: new Array(26).fill('506f7274'), lnk: 1, en: 67108863, dpx: 1, an: 67108863,
-    };
-  };
-  poller.client.portMeta ??= () => ({ name: 'Port', link: true, speed: 1e9, duplex: 'full', sfp: false });
 }
+
+const driver = SIM ? simDriver() : null;
+if (SIM) setInterval(() => driver.bump(), 1000).unref();
+
+const poller = new Poller(store, {
+  id: 'soak',
+  driver: driver || (await import(path.join(ROOT, 'lib/drivers.js'))).createDriver(
+    { id: 'soak', type: 'switch', driver: 'swos', host: process.env.SWITCH_HOST || '172.22.22.2', port: null, tls: false, auth: 'digest', intervalMs: INTERVAL },
+    { username: process.env.SWITCH_USER || 'admin', password: process.env.SWITCH_PASS || '' },
+  ),
+});
 
 const start = Date.now();
 let samples = 0;

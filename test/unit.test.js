@@ -131,18 +131,21 @@ test('digest header implements RFC 7616 MD5 qop=auth', () => {
 
 function makePoller() {
   const store = new HistoryStore(path.join(TMP, 'h1'));
-  return new Poller(store, { id: 'unit', client: { host: 'test', linksAt: 0, portMeta: () => ({ name: 'P', link: true, speed: 1e9, duplex: 'full', sfp: false }) } });
+  return new Poller(store, {
+    id: 'unit',
+    driver: {
+      host: 'test',
+      device: { name: 'unit' },
+      async readCounters() { return { ports: [] }; },
+      async listPorts() { return [{ index: 1, name: 'P', link: true, speed: 1e9, duplex: 'full', sfp: false }]; },
+    },
+  });
 }
-/** Build a raw counter payload: values[i] = {rx, tx} for port i. */
+/** Build a normalised counter payload: values[i] = {rx, tx} for port i. */
 function mk(values) {
-  const lo = (v) => v % 4294967296;
-  const hi = (v) => Math.floor(v / 4294967296);
-  const raw = { rb: [], rbh: [], tb: [], tbh: [] };
-  for (const v of values) {
-    raw.rb.push(lo(v.rx)); raw.rbh.push(hi(v.rx));
-    raw.tb.push(lo(v.tx)); raw.tbh.push(hi(v.tx));
-  }
-  return raw;
+  return {
+    ports: values.map((v, i) => ({ index: i + 1, rxBytes: v.rx, txBytes: v.tx })),
+  };
 }
 const P1 = (rx, tx) => [{ rx, tx }];
 

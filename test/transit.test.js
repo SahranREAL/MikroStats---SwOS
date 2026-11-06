@@ -38,36 +38,44 @@ const mbps = (x) => Math.round((x / 1e6) * 10) / 10;
 /** 32-bit split, exactly like SwOS reports rb/rbh and tb/tbh. */
 const split64 = (v) => ({ low: v >>> 0, high: Math.floor(v / 4294967296) >>> 0 });
 
-/** Counter fabric: each call to fetchStats() advances the cumulative counters. */
-function fakeClient() {
+/**
+ * Counter fabric acting as a driver: each readCounters() advances the
+ * cumulative counters, still going through the 32-bit split SwOS uses.
+ */
+function fakeDriver() {
   const rxTotals = new Array(PORTS).fill(0);
   const txTotals = new Array(PORTS).fill(0);
   return {
     host: 'fake.test',
-    links: {},
-    linksAt: Date.now(),
-    logError() {},
-    async fetchLinks() { this.linksAt = Date.now(); },
-    portMeta: (i) => ({ name: `Port${i + 1}`, link: true, speed: 1e9, duplex: 'full', sfp: false }),
-    async fetchStats(deltas) {
-      const rb = [], rbh = [], tb = [], tbh = [];
+    device: { name: 'transit' },
+    async listPorts() {
+      return Array.from({ length: PORTS }, (_, i) => ({
+        index: i + 1, name: `Port${i + 1}`, link: true, speed: 1e9, duplex: 'full', sfp: false,
+      }));
+    },
+    async readCounters(deltas) {
+      const ports = [];
       for (let i = 0; i < PORTS; i++) {
         rxTotals[i] += deltas[i].rx;
         txTotals[i] += deltas[i].tx;
         const rx = split64(rxTotals[i]);
         const tx = split64(txTotals[i]);
-        rb.push(rx.low); rbh.push(rx.high);
-        tb.push(tx.low); tbh.push(tx.high);
+        // Reassemble exactly like SwosDriver does from rb/rbh + tb/tbh.
+        ports.push({
+          index: i + 1,
+          rxBytes: rx.low + rx.high * 4294967296,
+          txBytes: tx.low + tx.high * 4294967296,
+        });
       }
-      return { rb, rbh, tb, tbh };
+      return { t: Date.now(), ports };
     },
   };
 }
 
 /** Feed one interval of `deltas` to the poller and return the resulting sample. */
-async function step(poller, client, deltas, t) {
-  const raw = await client.fetchStats(deltas);
-  const sample = poller.buildSample(raw, t);
+async function step(poller, driver, deltas, t) {
+  const counters = await driver.readCounters(deltas);
+  const sample = poller.buildSample(counters, t);
   poller.history.ingest(sample.t, GLOBAL_PORT, sample.inBps, sample.outBps);
   for (const p of sample.ports) poller.history.ingest(sample.t, p.index, p.inBps, p.outBps);
   return sample;
@@ -75,8 +83,8 @@ async function step(poller, client, deltas, t) {
 
 test('IN and OUT are correct for a received and for a transiting flow', async (t) => {
   const store = new HistoryStore(path.join(TMP, 'h'));
-  const poller = new Poller(store, { id: 'transit', client: fakeClient() });
-  const client = poller.client;
+  const poller = new Poller(store, { id: 'transit', driver: fakeDriver() });
+  const driver = poller.driver;
 
   // Timestamps are aligned so that the baseline and the burst always fall in
   // two different buckets, otherwise the store averages them together.
@@ -84,10 +92,10 @@ test('IN and OUT are correct for a received and for a transiting flow', async (t
 
   await t.test('un seul port recoit le download', async () => {
     const quiet = idle();
-    await step(poller, client, quiet, base);
+    await step(poller, driver, quiet, base);
     const burst = idle();
     burst[4] = { rx: FULL, tx: 0 };                        // port 5 receives
-    const s = await step(poller, client, burst, base + DT);
+    const s = await step(poller, driver, burst, base + DT);
 
     const p5 = s.ports[4];
     assert.ok(Math.abs(p5.inBps - BPS) < 1000, `port 5 IN ${mbps(p5.inBps)} Mb/s`);
@@ -101,12 +109,12 @@ test('IN and OUT are correct for a received and for a transiting flow', async (t
 
   await t.test('le meme download traverse le switch', async () => {
     const t0 = base + 60000;                                // a minute later
-    await step(poller, client, idle(), t0);
+    await step(poller, driver, idle(), t0);
 
     const transit = idle();
     transit[0] = { rx: FULL, tx: ACK_BYTES };              // uplink: receives
     transit[1] = { rx: ACK_BYTES, tx: FULL };              // device port: sends
-    const s = await step(poller, client, transit, t0 + DT);
+    const s = await step(poller, driver, transit, t0 + DT);
 
     const p1 = s.ports[0]; const p2 = s.ports[1];
     assert.ok(Math.abs(p1.inBps - BPS) < 1000 && p1.outBps < ACK * 2,

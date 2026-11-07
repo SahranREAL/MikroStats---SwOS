@@ -157,6 +157,34 @@ test('no API response ever contains the password', async () => {
   assert.ok(!hello.includes(SECRET), 'the SSE hello leaked the password');
 });
 
+/* ------------------------------------------------------------ I/O counters */
+
+test('status exposes the I/O budget (device, sse, disk counters)', async () => {
+  const before = await (await get('/api/status')).json();
+  assert.ok(before.io, 'io block missing');
+  assert.ok(before.io.device && Number.isInteger(before.io.device.requests), 'device.requests missing');
+  assert.ok(Array.isArray(before.io.device.perHost), 'device.perHost missing');
+  assert.ok(before.io.sse && Number.isInteger(before.io.sse.bytes), 'sse.bytes missing');
+  assert.ok(before.io.disk && Number.isInteger(before.io.disk.writes), 'disk.writes missing');
+
+  // One SSE frame must be accounted for, once, on the wire.
+  const ac = new AbortController();
+  const res = await fetch(`${BASE}/api/stream`, { signal: ac.signal });
+  const reader = res.body.getReader();
+  await reader.read();
+  ac.abort();
+  await new Promise((r) => setTimeout(r, 150));
+  const after = await (await get('/api/status')).json();
+  assert.ok(after.io.sse.bytes > before.io.sse.bytes,
+    `sse bytes did not grow (${before.io.sse.bytes} -> ${after.io.sse.bytes})`);
+  assert.ok(after.io.sse.frames > before.io.sse.frames, 'sse frames did not grow');
+
+  // Device counters only ever move when a poll really happens; they are
+  // cumulative and monotonic, never negative.
+  assert.ok(after.io.device.requests >= before.io.device.requests, 'device requests went backwards');
+  assert.ok(after.io.disk.writes >= before.io.disk.writes, 'disk writes went backwards');
+});
+
 test('validation rejects a public host, a bad interval and a bad type', async () => {
   const bad = [
     { id: 'bad1', host: 'example.com' },

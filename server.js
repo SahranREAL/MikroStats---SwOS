@@ -11,6 +11,7 @@ import * as alerts from './lib/alerts.js';
 import { TopologyStore, ValidationError, RevMismatch } from './lib/topology.js';
 import { DeviceManager } from './lib/manager.js';
 import { initAuth, requireToken, requireRead, writeLimiter, rateLimitHealth } from './lib/auth.js';
+import { ioStats } from './lib/net.js';
 
 const pkg = JSON.parse(fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'package.json'), 'utf8'));
 
@@ -455,6 +456,7 @@ api.get('/alerts', (_req, res) => {
 api.get('/status', (_req, res) => {
   const mem = process.memoryUsage();
   const h = history.health();
+  const topo = topology.health();
   const root = manager.rootDevice();
   const rootPoller = root ? manager.get(root.id) : null;
   res.json({
@@ -475,10 +477,20 @@ api.get('/status', (_req, res) => {
       heapUsedMb: +(mem.heapUsed / 1048576).toFixed(1),
     },
     history: h,
-    topology: topology.health(),
+    topology: topo,
     manager: manager.health(),
     rateLimit: rateLimitHealth(),
     sseClients: sse.size,
+    /* I/O budget: what the server really costs, in one place. Cumulative
+     * counters since process start; nothing here logs per tick. */
+    io: {
+      device: ioStats(),
+      sse: sse.snapshot(),
+      disk: {
+        writes: (h.flushes || 0) + (topo.writes || 0),
+        bytesWritten: (h.bytesWritten || 0) + (topo.bytesWritten || 0),
+      },
+    },
     alerts: alerts.active(),
     // The token itself is never included: only whether one is configured.
     auth: { mode: config.auth.mode, tokenConfigured: Boolean(token), requireForRead: config.auth.requireForRead },

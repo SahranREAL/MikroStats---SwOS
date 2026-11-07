@@ -156,6 +156,12 @@ async function run() {
   check('app.js never assigns innerHTML', !/\.innerHTML\s*=/.test(appSrc));
   check('map nodes are built with createElementNS', /createElementNS\(/.test(appSrc));
 
+  // CSP is `style-src 'self'`: a style="…" attribute is dropped by the browser
+  // (the legend swatches would silently vanish), so the markup must not use one.
+  const inlineStyleAttrs = (servedHtml.match(/\sstyle="/g) || []).length;
+  check('no inline style attributes (CSP style-src self)', inlineStyleAttrs === 0,
+    `${inlineStyleAttrs} found`);
+
   /* ------------------------------------------------------------- map view */
   check('map view is the default view', doc.getElementById('view-map').hidden === false
     && doc.getElementById('view-device').hidden === true);
@@ -211,6 +217,11 @@ async function run() {
   check('header type badge', doc.getElementById('hdr-type').textContent.length > 0,
     doc.getElementById('hdr-type').textContent);
 
+  // The SSE link may take a beat to come up (the badge is fed by the stream
+  // plus the periodic status poll): wait for it instead of racing it.
+  for (let i = 0; i < 24 && doc.getElementById('hdr-conn').dataset.state !== 'connected'; i++) {
+    await sleep(250);
+  }
   check('conn badge present', doc.getElementById('hdr-conn').dataset.state === 'connected',
     doc.getElementById('hdr-conn').dataset.state);
   check('KPI IN formatted', /bps|Kbps|Mbps|Gbps/.test(doc.getElementById('kpi-in').textContent),
@@ -420,6 +431,298 @@ async function run() {
     && doc.getElementById('view-device').hidden === true);
   check('map still rendered after navigation', doc.querySelectorAll('#map .node').length === mapNodes.length,
     `${doc.querySelectorAll('#map .node').length} node(s)`);
+
+  /* --------------------------------------------------- éditeur de schéma */
+  // Writes need the dashboard token: read it from the data dir the server
+  // was started with (UI_DATA_DIR/token) or from UI_TOKEN. Without it the
+  // mutation scenarios are skipped instead of failing on a 401.
+  const tokenFile = process.env.UI_TOKEN_FILE
+    || (process.env.UI_DATA_DIR ? path.join(process.env.UI_DATA_DIR, 'token') : '');
+  let adminToken = process.env.UI_TOKEN || '';
+  if (!adminToken && tokenFile && fs.existsSync(tokenFile)) {
+    adminToken = fs.readFileSync(tokenFile, 'utf8').trim();
+  }
+  const canWrite = adminToken.length >= 32;
+  if (!canWrite) console.log('SKIP  schema editor writes (no token: set UI_DATA_DIR or UI_TOKEN)');
+
+  const click = (node) => node.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  const pointer = (node, type, x, y) => node.dispatchEvent(
+    new window.MouseEvent(type, { bubbles: true, clientX: x, clientY: y, button: 0 }));
+
+  // -- mode édition
+  const modeBtns = doc.getElementById('map-mode').querySelectorAll('button');
+  click(modeBtns[1]);
+  await sleep(200);
+  check('edit mode toggles on', modeBtns[1].getAttribute('aria-pressed') === 'true'
+    && modeBtns[0].getAttribute('aria-pressed') === 'false');
+  check('edit toolbar revealed', doc.getElementById('map-tools').hidden === false
+    && doc.getElementById('map-wrap').classList.contains('editing'));
+  check('map hint switches to editing',
+    doc.getElementById('map-sub').textContent.includes('Mode édition'),
+    doc.getElementById('map-sub').textContent.slice(0, 60));
+
+  // -- grille optionnelle
+  const grid = doc.getElementById('map-grid');
+  grid.checked = true;
+  grid.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await sleep(200);
+  check('optional grid drawn', Boolean(doc.querySelector('#map .gridrect')));
+  grid.checked = false;
+  grid.dispatchEvent(new window.Event('change', { bubbles: true }));
+  await sleep(200);
+  check('grid removed when unticked', !doc.querySelector('#map .gridrect'));
+
+  // -- un clic sur un nœud ouvre l'éditeur (et non la navigation)
+  const nodeBefore = doc.querySelector('#map .node');
+  const devId = nodeBefore && nodeBefore.getAttribute('data-dev');
+  click(nodeBefore);
+  await sleep(200);
+  check('node click opens the device editor', doc.getElementById('modal-device').hidden === false
+    && devId === root.id, `data-dev=${devId}`);
+  check('editor prefilled from the device',
+    doc.getElementById('f-name').value === root.name && doc.getElementById('f-host').value === root.host,
+    `${doc.getElementById('f-name').value} / ${doc.getElementById('f-host').value}`);
+  check('delete button only when editing', doc.getElementById('dev-del').hidden === false);
+  check('editing does not navigate', window.location.hash === '#/', window.location.hash);
+  click(doc.getElementById('dev-cancel'));
+  await sleep(150);
+  check('editor closed', doc.getElementById('modal-device').hidden === true);
+
+  // -- clic en mode visualisation = navigation (inchangé)
+  click(modeBtns[0]);
+  await sleep(250);
+  click(doc.querySelector('#map .node'));      // rebuilt when the mode changed
+  await sleep(400);
+  if (doc.getElementById('view-device').hidden) {
+    // jsdom does not always emit hashchange: drive the router explicitly.
+    window.dispatchEvent(new window.Event('hashchange'));
+    await sleep(400);
+  }
+  check('view mode still opens the dashboard',
+    doc.getElementById('view-device').hidden === false, window.location.hash);
+  await goto('#/');
+  await sleep(400);
+
+  // -- molette = zoom, touche 0 = recentrer (pan/zoom de la carte)
+  const svgMap = doc.getElementById('map');
+  const vbStart = svgMap.getAttribute('viewBox');
+  svgMap.dispatchEvent(new window.WheelEvent('wheel', {
+    deltaY: -500, clientX: 420, clientY: 300, bubbles: true, cancelable: true,
+  }));
+  await sleep(200);
+  const vbZoomed = svgMap.getAttribute('viewBox');
+  check('wheel zooms the map in', vbZoomed !== vbStart, `${vbStart} -> ${vbZoomed}`);
+  svgMap.dispatchEvent(new window.KeyboardEvent('keydown', { key: '0', bubbles: true }));
+  await sleep(200);
+  check('key 0 recenters the map', svgMap.getAttribute('viewBox') !== vbZoomed
+    && svgMap.getAttribute('viewBox') === vbStart,
+    `${vbZoomed} -> ${svgMap.getAttribute('viewBox')}`);
+
+  // -- clavier : Entrée sur un nœud ouvre l'éditeur en mode édition
+  click(doc.querySelector('#map-mode button[data-mode="edit"]'));
+  await sleep(250);
+  const kbNode = doc.querySelector('#map .node');
+  kbNode.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  await sleep(250);
+  check('keyboard Enter opens the editor in edit mode',
+    doc.getElementById('modal-device').hidden === false);
+  click(doc.getElementById('dev-cancel'));
+  await sleep(150);
+
+  if (canWrite) {
+    // -- 401 -> demande de jeton, puis écriture acceptée
+    click(doc.querySelector('#map-mode button[data-mode="edit"]'));
+    await sleep(200);
+    click(doc.querySelector(`#map .node[data-dev="${root.id}"]`));
+    await sleep(200);
+    const specialName = 'Nom <b>spécial</b> & "co"';
+    doc.getElementById('f-name').value = specialName;
+    click(doc.getElementById('dev-save'));
+    await sleep(700);
+    check('401 asks for the admin token', doc.getElementById('modal-token').hidden === false);
+    doc.getElementById('tk-input').value = adminToken;
+    click(doc.getElementById('tk-save'));
+    await sleep(900);
+    check('token accepted and editor saved', doc.getElementById('modal-token').hidden === true
+      && doc.getElementById('modal-device').hidden === true);
+    const renamed = await (await fetch(`${BASE}/api/topology`)).json();
+    const renamedDev = renamed.devices.find((d) => d.id === root.id);
+    check('server stored the new name', renamedDev && renamedDev.name === specialName,
+      renamedDev && renamedDev.name);
+    const nodeText = doc.querySelector(`#map .node[data-dev="${root.id}"]`).textContent;
+    check('special characters are displayed, not parsed',
+      nodeText.includes('<b>spécial</b>') && doc.querySelectorAll('#map .node b').length === 0,
+      JSON.stringify(nodeText.slice(0, 60)));
+    const rowText = doc.getElementById('m-tbody').textContent;
+    check('device table shows the raw name too', rowText.includes('<b>spécial</b>'));
+
+    // -- « Tester la connexion » : une vraie requête vers le switch
+    click(doc.querySelector(`#map .node[data-dev="${root.id}"]`));
+    await sleep(250);
+    click(doc.getElementById('dev-test'));
+    const testOut = doc.getElementById('dev-test-result');
+    for (let i = 0; i < 24 && !/Connexion|Échec/.test(testOut.textContent); i++) await sleep(250);
+    check('test button reports a result', !testOut.hidden && /\S/.test(testOut.textContent),
+      testOut.textContent.slice(0, 120));
+    check('test button proves connectivity', testOut.textContent.includes('Connexion réussie'),
+      testOut.textContent.slice(0, 160));
+    click(doc.getElementById('dev-cancel'));
+    await sleep(200);
+
+    // -- ajout d'un second équipement (polling désactivé : aucune cible réelle)
+    click(doc.getElementById('map-add-device'));
+    await sleep(150);
+    doc.getElementById('f-id').value = 'sw-test';
+    doc.getElementById('f-name').value = 'Switch de test';
+    doc.getElementById('f-host').value = '192.168.77.77';
+    doc.getElementById('f-enabled').checked = false;
+    click(doc.getElementById('dev-save'));
+    await sleep(1200);
+    const afterAdd = await (await fetch(`${BASE}/api/topology`)).json();
+    check('device created through the API', afterAdd.devices.some((d) => d.id === 'sw-test'),
+      afterAdd.devices.map((d) => d.id).join(','));
+    check('new node rendered', Boolean(doc.querySelector('#map .node[data-dev="sw-test"]')));
+
+    // -- création de liens entre ports réels
+    click(doc.getElementById('map-add-link'));
+    await sleep(600);
+    doc.getElementById('lnk-b-dev').value = 'sw-test';
+    doc.getElementById('lnk-b-dev').dispatchEvent(new window.Event('change', { bubbles: true }));
+    await sleep(600);
+    const aPort = doc.getElementById('lnk-a-port');
+    const bPort = doc.getElementById('lnk-b-port');
+    check('port pickers built for both ends', Boolean(aPort.firstElementChild) && Boolean(bPort.firstElementChild),
+      `a=${aPort.dataset.mode || '-'}, b=${bPort.dataset.mode || '-'}`);
+    if (bPort.dataset.mode === 'number') bPort.firstElementChild.value = '1';
+    if (aPort.dataset.mode === 'number') aPort.firstElementChild.value = '1';
+    doc.getElementById('lnk-label').value = 'lien de test';
+    click(doc.getElementById('lnk-save'));
+    await sleep(1200);
+    const linkElsAfter = doc.querySelectorAll('#map .lnk');
+    const topoLink = await (await fetch(`${BASE}/api/topology`)).json();
+    check('link created and drawn', linkElsAfter.length === 1,
+      `${linkElsAfter.length} in DOM, ${topoLink.links.length} in topology, err=${doc.getElementById('lnk-error').textContent || '-'}`);
+    const drawnLine = linkElsAfter[0] && linkElsAfter[0].querySelector('line');
+    check('link line carries real coordinates',
+      Boolean(drawnLine) && Number(drawnLine.getAttribute('x2')) !== Number(drawnLine.getAttribute('x1')),
+      drawnLine && `${drawnLine.getAttribute('x1')},${drawnLine.getAttribute('y1')} -> ${drawnLine.getAttribute('x2')},${drawnLine.getAttribute('y2')}`);
+    const portTexts = [...(linkElsAfter[0] || { querySelectorAll: () => [] }).querySelectorAll('text.port')]
+      .map((t) => t.textContent);
+    check('link shows a port at each end', portTexts.length === 2 && portTexts.every((t) => /\S/.test(t)),
+      portTexts.join(' / '));
+
+    // -- drag & drop persiste la position (une seule écriture au drop)
+    // Un passage précédent peut avoir laissé le nœud verrouillé : on s'assure
+    // qu'il est déverrouillé avant de tester le glissement.
+    let topoBefore = await (await fetch(`${BASE}/api/topology`)).json();
+    let rootBefore = topoBefore.devices.find((d) => d.id === root.id);
+    if (rootBefore && rootBefore.layout && rootBefore.layout.locked) {
+      const lockNow = doc.querySelector(`#map .node[data-dev="${root.id}"] .lock`);
+      if (lockNow) {
+        click(lockNow);
+        await sleep(1000);
+        topoBefore = await (await fetch(`${BASE}/api/topology`)).json();
+        rootBefore = topoBefore.devices.find((d) => d.id === root.id);
+      }
+    }
+    const beforePos = (rootBefore || {}).layout || null;
+    const dragNode = doc.querySelector(`#map .node[data-dev="${root.id}"]`);
+    const baseX = Number(/translate\(([-\d.]+)\s+([-\d.]+)\)/.exec(dragNode.getAttribute('transform'))[1]);
+    pointer(dragNode, 'pointerdown', 400, 300);
+    pointer(dragNode, 'pointermove', 445, 330);
+    pointer(doc.getElementById('map'), 'pointermove', 445, 330);
+    pointer(dragNode, 'pointerup', 445, 330);
+    await sleep(1200);
+    const dragNodeAfter = doc.querySelector(`#map .node[data-dev="${root.id}"]`) || dragNode;
+    const movedX = Number(/translate\(([-\d.]+)\s+([-\d.]+)\)/.exec(dragNodeAfter.getAttribute('transform'))[1]);
+    check('drag moves the node on screen', movedX !== baseX, `${baseX} -> ${movedX}`);
+    const topoAfter = await (await fetch(`${BASE}/api/topology`)).json();
+    const afterPos = (topoAfter.devices.find((d) => d.id === root.id) || {}).layout || null;
+    check('drag persists the layout', Boolean(afterPos) && afterPos.x === movedX,
+      `layout.x=${afterPos && afterPos.x}, dom=${movedX}, avant=${beforePos && beforePos.x}`);
+
+    // -- verrouillage de la position (aller-retour : l'état de départ dépend
+    //    de l'état déjà enregistré sur le serveur)
+    const topoPreLock = await (await fetch(`${BASE}/api/topology`)).json();
+    const preLock = topoPreLock.devices.find((d) => d.id === root.id) || {};
+    const wasLocked = Boolean(preLock.layout && preLock.layout.locked);
+    const lock = doc.querySelector(`#map .node[data-dev="${root.id}"] .lock`);
+    check('padlock visible in edit mode', Boolean(lock));
+    click(lock);
+    await sleep(1000);
+    const topoLocked = await (await fetch(`${BASE}/api/topology`)).json();
+    const lockedDev = topoLocked.devices.find((d) => d.id === root.id) || {};
+    const nowLocked = Boolean(lockedDev.layout && lockedDev.layout.locked === true);
+    check('padlock toggles the position lock', nowLocked === !wasLocked,
+      `avant=${wasLocked}, après=${nowLocked}`);
+    check('locked node is marked',
+      doc.querySelector(`#map .node[data-dev="${root.id}"]`).classList.contains('locked') === nowLocked,
+      `classe=${doc.querySelector(`#map .node[data-dev="${root.id}"]`).className}`);
+
+    // -- recentrage
+    click(doc.getElementById('map-recenter'));
+    await sleep(150);
+    const vbNow = doc.getElementById('map').getAttribute('viewBox') || '';
+    check('recentre restores the viewBox',
+      /^-?[\d.]+ -?[\d.]+ [\d.]+ [\d.]+$/.test(vbNow.trim()), vbNow);
+
+    // -- réorganisation automatique (un seul lot d'écritures)
+    click(doc.getElementById('map-auto'));
+    await sleep(1400);
+    const topoAuto = await (await fetch(`${BASE}/api/topology`)).json();
+    const allPlaced = topoAuto.devices.every((d) => d.layout
+      && Number.isFinite(d.layout.x) && Number.isFinite(d.layout.y));
+    check('auto layout stores a position for every device', allPlaced,
+      topoAuto.devices.map((d) => `${d.id}:${d.layout ? `${d.layout.x},${d.layout.y}` : 'none'}`).join(' '));
+
+    // -- suppression d'un lien avec confirmation
+    const linkToDelete = doc.querySelector('#map .lnk');
+    if (linkToDelete) {
+      click(linkToDelete);
+      await sleep(250);
+      check('link editor opens', doc.getElementById('modal-link').hidden === false
+        && doc.getElementById('lnk-del').hidden === false);
+      click(doc.getElementById('lnk-del'));
+      await sleep(250);
+      check('delete asks for confirmation', doc.getElementById('modal-confirm').hidden === false
+        && doc.getElementById('cf-msg').textContent.includes('lien'));
+      click(doc.getElementById('cf-yes'));
+      await sleep(1200);
+      const topoNoLink = await (await fetch(`${BASE}/api/topology`)).json();
+      check('link removed after confirmation', topoNoLink.links.length === 0
+        && doc.querySelectorAll('#map .lnk').length === 0,
+        `${topoNoLink.links.length} link(s) in topology`);
+    } else {
+      check('link editor opens', false, 'no link on the map to open');
+    }
+
+    // -- suppression de l'équipement de test avec confirmation
+    const testNode = doc.querySelector('#map .node[data-dev="sw-test"]');
+    if (testNode) {
+      click(testNode);
+      await sleep(250);
+      click(doc.getElementById('dev-del'));
+      await sleep(250);
+      check('device delete asks for confirmation', doc.getElementById('modal-confirm').hidden === false
+        && doc.getElementById('cf-msg').textContent.includes('Switch de test'));
+      click(doc.getElementById('cf-yes'));
+      await sleep(1200);
+      const topoNoDev = await (await fetch(`${BASE}/api/topology`)).json();
+      check('device removed after confirmation', !topoNoDev.devices.some((d) => d.id === 'sw-test')
+        && !doc.querySelector('#map .node[data-dev="sw-test"]'),
+        topoNoDev.devices.map((d) => d.id).join(','));
+    } else {
+      check('device delete asks for confirmation', false, 'test device missing on the map');
+    }
+  }
+
+  // -- retour en visualisation
+  click(doc.querySelector('#map-mode button[data-mode="view"]'));
+  await sleep(250);
+  check('view mode hides the toolbar',
+    doc.getElementById('map-tools').hidden === true
+    && doc.querySelector('#map-mode button[data-mode="view"]').getAttribute('aria-pressed') === 'true');
+  check('view mode drops the padlocks', !doc.querySelector('#map .node .lock'));
 
   console.log('\n--- runtime errors ---');
   if (errors.length === 0) console.log('none');

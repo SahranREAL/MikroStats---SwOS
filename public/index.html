@@ -47,18 +47,31 @@
 
   <section class="card">
     <div class="card-hd">
-      <div><h2>Topologie</h2><div class="sub">Cliquez sur un équipement pour ouvrir son tableau de bord</div></div>
+      <div><h2>Topologie</h2><div class="sub" id="map-sub">Cliquez sur un équipement pour ouvrir son tableau de bord</div></div>
       <div class="tools">
         <div class="legend">
-          <span><i class="lk" style="background:#6abf4b"></i>charge &lt; 60 %</span>
-          <span><i class="lk" style="background:#fbab18"></i>60–85 %</span>
-          <span><i class="lk" style="background:#e2231a"></i>charge &gt; 85 %</span>
+          <span><i class="lk lk-ok"></i>charge &lt; 60 %</span>
+          <span><i class="lk lk-warn"></i>60–85 %</span>
+          <span><i class="lk lk-crit"></i>charge &gt; 85 %</span>
           <span><i class="lk dash"></i>lien down</span>
+        </div>
+        <div class="seg" id="map-mode" role="group" aria-label="Mode de la carte">
+          <button type="button" data-mode="view" aria-pressed="true">Visualisation</button>
+          <button type="button" data-mode="edit" aria-pressed="false">Édition</button>
+        </div>
+        <button type="button" class="btn" id="map-recenter" title="Recentrer la carte (touche 0)">Recentrer</button>
+        <div class="editbar" id="map-tools" hidden>
+          <button type="button" class="btn primary" id="map-add-device">+ Équipement</button>
+          <button type="button" class="btn" id="map-add-link">+ Lien</button>
+          <button type="button" class="btn" id="map-auto" title="Repositionner tous les équipements">Réorganiser automatiquement</button>
+          <label class="chk"><input type="checkbox" id="map-grid"> Grille</label>
         </div>
       </div>
     </div>
     <div class="card-bd">
-      <div class="map-wrap"><svg id="map" role="group" aria-label="Carte du réseau"></svg></div>
+      <div class="map-wrap" id="map-wrap">
+        <svg id="map" role="group" tabindex="0" aria-label="Carte du réseau — flèches pour déplacer la vue, +/− pour zoomer, 0 pour recentrer"></svg>
+      </div>
       <div class="plate-key map-hint">
         <span><b class="c-up">&rarr;</b> au-dessus du lien : trafic vers la droite</span>
         <span><b class="c-down">&larr;</b> en dessous : trafic vers la gauche</span>
@@ -145,9 +158,9 @@
     <div class="card-bd">
       <div class="plate" id="plate"></div>
       <div class="plate-key">
-        <span><i style="background:#dff3d6;border-color:#8fcf75"></i>Lien up</span>
-        <span><i style="background:#cfeaf7;border-color:var(--brand)"></i>Trafic &gt; 1 Mb/s</span>
-        <span><i style="background:#d5dce3"></i>Lien down</span>
+        <span><i class="pk pk-up"></i>Lien up</span>
+        <span><i class="pk pk-act"></i>Trafic &gt; 1 Mb/s</span>
+        <span><i class="pk pk-down"></i>Lien down</span>
       </div>
     </div>
   </section>
@@ -219,6 +232,120 @@
     </div>
   </div>
 </div>
+
+<!-- ============================================================ éditeur -->
+<div class="modal" id="modal-device" hidden>
+  <div class="mbox wide" role="dialog" aria-modal="true" aria-labelledby="dev-title">
+    <div class="mhd"><h3 id="dev-title">Ajouter un équipement</h3><button type="button" id="dev-close" aria-label="Fermer">&times;</button></div>
+    <div class="mbody">
+      <form id="dev-form" autocomplete="off" novalidate>
+        <div class="fgrid">
+          <label class="f"><span>Identifiant</span><input id="f-id" maxlength="64" placeholder="généré depuis le nom" spellcheck="false"></label>
+          <label class="f"><span>Nom *</span><input id="f-name" maxlength="80" required placeholder="CSS326 du local"></label>
+          <label class="f"><span>Type</span>
+            <select id="f-type">
+              <option value="switch">Switch SwOS</option>
+              <option value="router">Routeur RouterOS</option>
+            </select>
+          </label>
+          <label class="f"><span>Modèle</span><input id="f-model" maxlength="80" placeholder="CSS326-24S-2S+"></label>
+          <label class="f"><span>Adresse IP / hostname *</span><input id="f-host" maxlength="253" required placeholder="172.22.22.2" spellcheck="false"></label>
+          <label class="f"><span>Port TCP (vide = défaut)</span><input id="f-port" type="number" min="1" max="65535" placeholder="8728 / 443 / 80"></label>
+          <label class="f"><span>Authentification</span>
+            <select id="f-auth">
+              <option value="digest">Digest (SwOS)</option>
+              <option value="basic">Basic</option>
+              <option value="none">Aucune</option>
+            </select>
+          </label>
+          <label class="f"><span>Utilisateur</span><input id="f-user" maxlength="64" placeholder="admin" spellcheck="false"></label>
+          <label class="f"><span>Mot de passe</span><input id="f-pass" type="password" maxlength="128" placeholder="laisser vide si vide" autocomplete="new-password"></label>
+          <label class="f"><span>Intervalle de polling (s)</span><input id="f-interval" type="number" min="1" max="600" step="1" value="3"></label>
+          <label class="f"><span>Ports</span>
+            <select id="f-ports-mode">
+              <option value="auto">Détection automatique</option>
+              <option value="manual">Liste manuelle</option>
+            </select>
+          </label>
+          <label class="f full" id="f-ports-wrap" hidden><span>Ports (un par ligne&nbsp;: <code>index nom [ethernet|sfp]</code>)</span>
+            <textarea id="f-ports" rows="4" placeholder="1 WAN ethernet&#10;16 PVE-PROD-R9-01 ethernet&#10;25 SFP1 sfp" spellcheck="false"></textarea>
+          </label>
+        </div>
+        <div class="fchk">
+          <label class="chk"><input type="checkbox" id="f-root"> Équipement racine (tableau de bord par défaut)</label>
+          <label class="chk"><input type="checkbox" id="f-enabled" checked> Activer le polling</label>
+          <label class="chk"><input type="checkbox" id="f-tls"> Connexion HTTPS (TLS)</label>
+        </div>
+        <div class="fmsg" id="dev-test-result" hidden></div>
+        <div class="fmsg err" id="dev-error" hidden></div>
+      </form>
+      <div class="mfoot">
+        <button type="button" class="btn" id="dev-test">Tester la connexion</button>
+        <button type="button" class="btn danger" id="dev-del" hidden>Supprimer</button>
+        <span class="sp"></span>
+        <button type="button" class="btn" id="dev-cancel">Annuler</button>
+        <button type="button" class="btn primary" id="dev-save">Enregistrer</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="modal-link" hidden>
+  <div class="mbox" role="dialog" aria-modal="true" aria-labelledby="lnk-title">
+    <div class="mhd"><h3 id="lnk-title">Nouveau lien</h3><button type="button" id="lnk-close" aria-label="Fermer">&times;</button></div>
+    <div class="mbody">
+      <div class="fgrid">
+        <label class="f"><span>De l'équipement A</span><select id="lnk-a-dev"></select></label>
+        <label class="f"><span>Port sur A</span><span class="picker" id="lnk-a-port"></span></label>
+        <label class="f"><span>Vers l'équipement B</span><select id="lnk-b-dev"></select></label>
+        <label class="f"><span>Port sur B</span><span class="picker" id="lnk-b-port"></span></label>
+        <label class="f"><span>Libellé (optionnel)</span><input id="lnk-label" maxlength="60" placeholder="Uplink Orange"></label>
+        <label class="f"><span>Capacité en Mb/s (optionnel)</span><input id="lnk-cap" type="number" min="1" max="10000000" placeholder="auto : vitesse négociée"></label>
+      </div>
+      <div class="fmsg" id="lnk-info">La capacité est détectée automatiquement à partir de la vitesse négociée des deux ports.</div>
+      <div class="fmsg err" id="lnk-error" hidden></div>
+      <div class="mfoot">
+        <button type="button" class="btn danger" id="lnk-del" hidden>Supprimer</button>
+        <span class="sp"></span>
+        <button type="button" class="btn" id="lnk-cancel">Annuler</button>
+        <button type="button" class="btn primary" id="lnk-save">Enregistrer</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="modal-confirm" hidden>
+  <div class="mbox small" role="dialog" aria-modal="true" aria-labelledby="cf-title">
+    <div class="mhd"><h3 id="cf-title">Confirmer</h3></div>
+    <div class="mbody">
+      <p id="cf-msg"></p>
+      <div class="mfoot">
+        <span class="sp"></span>
+        <button type="button" class="btn" id="cf-no">Annuler</button>
+        <button type="button" class="btn danger-solid" id="cf-yes">Supprimer</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="modal-token" hidden>
+  <div class="mbox small" role="dialog" aria-modal="true" aria-labelledby="tk-title">
+    <div class="mhd"><h3 id="tk-title">Jeton d'administration</h3><button type="button" id="tk-close" aria-label="Fermer">&times;</button></div>
+    <div class="mbody">
+      <p class="ftxt">Toute modification nécessite le jeton généré au premier démarrage
+        (fichier <code>data/token</code>, ou variable <code>DASHBOARD_TOKEN</code>).</p>
+      <label class="f"><span>Jeton</span><input id="tk-input" type="password" autocomplete="off" spellcheck="false"></label>
+      <div class="fmsg err" id="tk-error" hidden></div>
+      <div class="mfoot">
+        <span class="sp"></span>
+        <button type="button" class="btn" id="tk-cancel">Annuler</button>
+        <button type="button" class="btn primary" id="tk-save">Valider</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
 
 <script src="/vendor/chart.umd.js"></script>
 <script src="/vendor/hammer.min.js"></script>

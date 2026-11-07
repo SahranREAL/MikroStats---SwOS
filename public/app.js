@@ -181,6 +181,12 @@ const state = {
   liveTail: { t: [], in: [], out: [] },
   liveCap: 400,
   zoomed: false,
+
+  // schema editor
+  edit: false,          // false = visualisation, true = édition
+  grid: false,          // grille optionnelle (mode édition)
+  mapVB: null,          // {x,y,w,h} viewBox courant de la carte
+  mapVBBase: null,      // viewBox d'origine (bornes du zoom)
 };
 
 let globalChart = null;
@@ -195,6 +201,13 @@ const nodeEls = new Map();      // device id -> {g, bar, up, dn}
 const pendingHistory = new Map();
 let plateEth = null;
 let plateSfp = null;
+
+/* Editor interaction state (drag / pan / pinch). */
+let dragState = null;      // {id, cx, cy, ox, oy, sc, moved}
+let panState = null;       // {cx, cy, moved}
+let justDragged = false;   // suppress the click that follows a drag
+let pinchState = null;     // {dist, cx, cy}
+const activePointers = new Map();   // pointerId -> {x, y}
 
 /* ------------------------------------------------------------------ charts */
 
@@ -596,6 +609,17 @@ function buildMap() {
   POS = computeLayout();
   if (Object.keys(POS).length === 0) { mapBuilt = false; return; }
 
+  // ---- optional 20px grid (edit mode): also the pan target under the nodes
+  if (state.grid) {
+    const defs = s('defs');
+    const pat = s('pattern', { id: 'gridpat', width: '20', height: '20', patternUnits: 'userSpaceOnUse' });
+    pat.append(s('path', { d: 'M20 0H0V20', fill: 'none', stroke: '#e3e9ef', 'stroke-width': '1' }));
+    defs.append(pat);
+    svg.append(defs, s('rect', {
+      class: 'gridrect', x: '-100000', y: '-100000', width: '200000', height: '200000', fill: 'url(#gridpat)',
+    }));
+  }
+
   // ---- links
   for (const link of state.links.values()) {
     const e = linkEdge(link);
@@ -605,7 +629,11 @@ function buildMap() {
     const my = (e.y1 + e.y2) / 2;
 
     const g = s('g', { class: 'lnk', 'data-link': link.id, tabindex: '0', role: 'button' });
-    const line = s('line', { class: 'lk-line', 'stroke-width': '4' });
+    const line = s('line', {
+      class: 'lk-line',
+      'stroke-width': '4',
+      x1: String(e.x1), y1: String(e.y1), x2: String(e.x2), y2: String(e.y2),
+    });
     const sp = s('text', { class: 'port', transform: `translate(${e.x1} ${e.y1}) rotate(${ang})`, x: '10', y: '-6' });
     const ep = s('text', { class: 'port', transform: `translate(${e.x2} ${e.y2}) rotate(${ang})`, x: '-10', y: '-6', 'text-anchor': 'end' });
     const labels = s('g', { transform: `translate(${mx} ${my}) rotate(${ang})` });
@@ -616,6 +644,8 @@ function buildMap() {
     g.append(line, sp, ep, labels, title);
 
     const open = () => {
+      if (justDragged) return;
+      if (state.edit) { openLinkModal(link.id); return; }
       const dev = link.a.device;
       if (state.devices.has(dev)) goDevice(dev);
     };
@@ -625,19 +655,20 @@ function buildMap() {
     });
 
     svg.append(g);
-    linkEls.set(link.id, { g, line, top, bottom, sp, ep, title, edge: e });
+    linkEls.set(link.id, { g, line, labels, top, bottom, sp, ep, title, edge: e });
   }
 
   // ---- nodes
   for (const dev of state.devices.values()) {
     const p = POS[dev.id];
     if (!p) continue;
+    const locked = Boolean(dev.layout && dev.layout.locked);
     const g = s('g', {
-      class: 'node',
+      class: `node${locked ? ' locked' : ''}${dev.enabled === false ? ' off' : ''}`,
       'data-dev': dev.id,
       tabindex: '0',
       role: 'button',
-      'aria-label': `${dev.name} — ouvrir le tableau de bord`,
+      'aria-label': state.edit ? `${dev.name} — modifier cet équipement` : `${dev.name} — ouvrir le tableau de bord`,
       transform: `translate(${p.x} ${p.y})`,
     });
     const box = s('rect', { class: 'nbox', width: String(NW), height: String(NH), rx: '6' });
@@ -652,14 +683,46 @@ function buildMap() {
     const title = s('title', {}, `${dev.name} (${dev.host || 'sans IP'})`);
     g.append(box, bar, icon, name, model, rates, title);
 
-    const open = () => goDevice(dev.id);
+    // Padlock: only in edit mode, toggles the position lock for this node.
+    let lock = null;
+    if (state.edit) {
+      lock = s('g', {
+        class: 'lock',
+        transform: `translate(${NW - 24} 6)`,
+        tabindex: '0',
+        role: 'button',
+        'aria-label': `${dev.name} — ${locked ? 'déverrouiller' : 'verrouiller'} la position`,
+      });
+      lock.append(
+        s('rect', { width: '18', height: '18', rx: '3' }),
+        s('path', { d: 'M6 9V6.6a3 3 0 0 1 6 0V9' }),
+        s('rect', {
+          x: '5', y: '9', width: '8', height: '6.5', rx: '1.5',
+          fill: locked ? '#e2231a' : '#6b7a89', stroke: 'none',
+        }),
+      );
+      const toggle = (ev) => { ev.preventDefault(); ev.stopPropagation(); toggleLock(dev.id); };
+      lock.addEventListener('click', toggle);
+      lock.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter' || ev.key === ' ') toggle(ev);
+      });
+      g.append(lock);
+    }
+
+    const open = () => {
+      if (justDragged) return;
+      if (state.edit) openDeviceModal(dev.id);
+      else goDevice(dev.id);
+    };
     g.addEventListener('click', open);
     g.addEventListener('keydown', (ev) => {
       if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); open(); }
     });
+    // Drag starts on the node itself; the background handler pans instead.
+    g.addEventListener('pointerdown', (ev) => startNodeDrag(ev, dev.id));
 
     svg.append(g);
-    nodeEls.set(dev.id, { g, bar, up, dn, name, model, title });
+    nodeEls.set(dev.id, { g, bar, up, dn, name, model, title, lock });
   }
 
   fitMap();
@@ -688,18 +751,77 @@ function switchIcon() {
   return g;
 }
 
+/** Apply the current viewBox (kept in state so pan/zoom work without layout). */
+function applyViewBox() {
+  const vb = state.mapVB;
+  if (!vb) return;
+  $('map').setAttribute('viewBox', `${vb.x} ${vb.y} ${vb.w} ${vb.h}`);
+}
+
 /** viewBox covering every node, whatever the layout (stored or automatic). */
 function fitMap() {
-  const svg = $('map');
   const xs = [];
   const ys = [];
   for (const p of Object.values(POS)) { xs.push(p.x); ys.push(p.y); }
-  if (xs.length === 0) { svg.setAttribute('viewBox', '0 0 800 300'); return; }
+  if (xs.length === 0) { state.mapVB = { x: 0, y: 0, w: 800, h: 300 }; applyViewBox(); return; }
   const minX = Math.min(...xs) - PAD;
   const minY = Math.min(...ys) - PAD;
   const maxX = Math.max(...xs) + NW + PAD;
   const maxY = Math.max(...ys) + NH + PAD;
-  svg.setAttribute('viewBox', `${minX} ${minY} ${Math.max(1, maxX - minX)} ${Math.max(1, maxY - minY)}`);
+  state.mapVB = { x: minX, y: minY, w: Math.max(1, maxX - minX), h: Math.max(1, maxY - minY) };
+  state.mapVBBase = { ...state.mapVB };
+  applyViewBox();
+}
+
+/** Zoom the map around a client point (or its centre when unknown). */
+function zoomMap(factor, cx, cy) {
+  const vb = state.mapVB;
+  if (!vb) return;
+  const base = state.mapVBBase || vb;
+  const w = Math.min(base.w * 8, Math.max(base.w / 6, vb.w * factor));
+  const k = w / vb.w;
+  const h = vb.h * k;
+  let px = vb.x + vb.w / 2;
+  let py = vb.y + vb.h / 2;
+  const r = $('map').getBoundingClientRect();
+  if (cx !== undefined && r.width > 0 && r.height > 0) {
+    px = vb.x + ((cx - r.left) / r.width) * vb.w;
+    py = vb.y + ((cy - r.top) / r.height) * vb.h;
+  }
+  state.mapVB = { x: px - (px - vb.x) * k, y: py - (py - vb.y) * k, w, h };
+  applyViewBox();
+}
+
+/** Move the view by a number of client pixels. */
+function panMap(dxPx, dyPx) {
+  const vb = state.mapVB;
+  if (!vb) return;
+  const r = $('map').getBoundingClientRect();
+  const sx = r.width > 0 ? vb.w / r.width : 1;
+  const sy = r.height > 0 ? vb.h / r.height : 1;
+  vb.x -= dxPx * sx;
+  vb.y -= dyPx * sy;
+  applyViewBox();
+}
+
+/** Redraw every link after a node moved (drag, auto-layout, lock toggle). */
+function updateLinkGeometry() {
+  for (const link of state.links.values()) {
+    const els = linkEls.get(link.id);
+    if (!els) continue;
+    const e = linkEdge(link);
+    if (!e) continue;
+    els.edge = e;
+    const ang = Math.atan2(e.y2 - e.y1, e.x2 - e.x1) * 180 / Math.PI;
+    els.line.setAttribute('x1', String(e.x1));
+    els.line.setAttribute('y1', String(e.y1));
+    els.line.setAttribute('x2', String(e.x2));
+    els.line.setAttribute('y2', String(e.y2));
+    els.sp.setAttribute('transform', `translate(${e.x1} ${e.y1}) rotate(${ang})`);
+    els.ep.setAttribute('transform', `translate(${e.x2} ${e.y2}) rotate(${ang})`);
+    els.labels.setAttribute('transform',
+      `translate(${(e.x1 + e.x2) / 2} ${(e.y1 + e.y2) / 2}) rotate(${ang})`);
+  }
 }
 
 function deviceStatus(id) {
@@ -1645,6 +1767,747 @@ function wireControls() {
     refreshGlobal();
     if (state.modalPort) loadPortHistory();
   }, 60000);
+
+  /* --------------------------------------------------- éditeur de schéma */
+  for (const b of $('map-mode').querySelectorAll('button')) {
+    b.addEventListener('click', () => setEditMode(b.dataset.mode === 'edit'));
+  }
+  $('map-add-device').addEventListener('click', () => openDeviceModal(null));
+  $('map-add-link').addEventListener('click', () => openLinkModal(null));
+  $('map-auto').addEventListener('click', () => { autoLayout().catch(() => {}); });
+  $('map-recenter').addEventListener('click', () => fitMap());
+  $('map-grid').addEventListener('change', (e) => {
+    state.grid = Boolean(e.target.checked);
+    mapBuilt = false;
+    mark('map');
+  });
+
+  const map = $('map');
+  map.addEventListener('wheel', (ev) => {
+    ev.preventDefault();
+    zoomMap(Math.exp(ev.deltaY * 0.0018), ev.clientX, ev.clientY);
+  }, { passive: false });
+  map.addEventListener('pointerdown', onMapPointerDown);
+  map.addEventListener('keydown', onMapKeydown);
+  document.addEventListener('pointermove', onDocPointerMove);
+  document.addEventListener('pointerup', onDocPointerUp);
+  document.addEventListener('pointercancel', onDocPointerUp);
+
+  // device modal
+  const closeDevice = () => { $('modal-device').hidden = true; };
+  $('dev-close').addEventListener('click', closeDevice);
+  $('dev-cancel').addEventListener('click', closeDevice);
+  $('modal-device').addEventListener('click', (e) => { if (e.target === $('modal-device')) closeDevice(); });
+  $('dev-save').addEventListener('click', () => { saveDevice().catch((err) => showDevError(String(err))); });
+  $('dev-del').addEventListener('click', () => { deleteDevice().catch((err) => showDevError(String(err))); });
+  $('dev-test').addEventListener('click', () => { testDevice().catch((err) => showDevError(String(err))); });
+  $('dev-form').addEventListener('submit', (e) => { e.preventDefault(); saveDevice().catch(() => {}); });
+  $('f-ports-mode').addEventListener('change', () => {
+    $('f-ports-wrap').hidden = $('f-ports-mode').value !== 'manual';
+  });
+
+  // link modal
+  const closeLink = () => { $('modal-link').hidden = true; };
+  $('lnk-close').addEventListener('click', closeLink);
+  $('lnk-cancel').addEventListener('click', closeLink);
+  $('modal-link').addEventListener('click', (e) => { if (e.target === $('modal-link')) closeLink(); });
+  $('lnk-save').addEventListener('click', () => { saveLink().catch((err) => showLnkError(String(err))); });
+  $('lnk-del').addEventListener('click', () => { deleteLink().catch((err) => showLnkError(String(err))); });
+  $('lnk-a-dev').addEventListener('change', () => { onLinkDeviceChange('a').catch(() => {}); });
+  $('lnk-b-dev').addEventListener('change', () => { onLinkDeviceChange('b').catch(() => {}); });
+
+  // confirmation + token prompts
+  $('cf-yes').addEventListener('click', () => closeConfirm(true));
+  $('cf-no').addEventListener('click', () => closeConfirm(false));
+  $('modal-confirm').addEventListener('click', (e) => { if (e.target === $('modal-confirm')) closeConfirm(false); });
+  $('tk-save').addEventListener('click', () => {
+    const value = $('tk-input').value.trim();
+    if (!value) {
+      const box = $('tk-error');
+      box.textContent = 'Collez le jeton (fichier data/token).';
+      box.hidden = false;
+      return;
+    }
+    closeToken(value);
+  });
+  $('tk-cancel').addEventListener('click', () => closeToken(null));
+  $('tk-close').addEventListener('click', () => closeToken(null));
+  $('modal-token').addEventListener('click', (e) => { if (e.target === $('modal-token')) closeToken(null); });
+  $('tk-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); $('tk-save').click(); }
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if (!$('modal-token').hidden) closeToken(null);
+    else if (!$('modal-confirm').hidden) closeConfirm(false);
+    else if (!$('modal-device').hidden) $('modal-device').hidden = true;
+    else if (!$('modal-link').hidden) $('modal-link').hidden = true;
+  });
+}
+
+/* ============================================================ éditeur de schéma */
+
+let toastTimer = 0;
+function toast(message, kind) {
+  const t = $('toast');
+  t.textContent = message;
+  t.className = 'toast' + (kind === 'err' ? ' err' : '');
+  t.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.hidden = true; }, 3400);
+}
+
+/* ---- confirmation (native confirm() is not available headless, and the copy
+ *      must be translatable): resolves true/false. */
+let confirmResolver = null;
+function confirmDialog(title, message, okLabel) {
+  return new Promise((resolve) => {
+    confirmResolver = resolve;
+    $('cf-title').textContent = title;
+    $('cf-msg').textContent = message;
+    $('cf-yes').textContent = okLabel || 'Supprimer';
+    $('modal-confirm').hidden = false;
+    $('cf-no').focus?.();
+  });
+}
+function closeConfirm(value) {
+  $('modal-confirm').hidden = true;
+  const r = confirmResolver;
+  confirmResolver = null;
+  if (r) r(Boolean(value));
+}
+
+/* ---- admin token: asked once per tab, kept in sessionStorage (never logged,
+ *      never rendered — a password-type input, value only read back). */
+const TOKEN_KEY = 'mikrostats.token';
+function storedToken() {
+  try { return sessionStorage.getItem(TOKEN_KEY) || ''; } catch { return ''; }
+}
+function storeToken(value) {
+  try { if (value) sessionStorage.setItem(TOKEN_KEY, value); else sessionStorage.removeItem(TOKEN_KEY); }
+  catch { /* private mode: the token is then asked for on every write */ }
+}
+let tokenResolver = null;
+function askToken() {
+  return new Promise((resolve) => {
+    tokenResolver = resolve;
+    $('tk-input').value = '';
+    $('tk-error').hidden = true;
+    $('modal-token').hidden = false;
+    $('tk-input').focus?.();
+  });
+}
+function closeToken(value) {
+  $('modal-token').hidden = true;
+  const r = tokenResolver;
+  tokenResolver = null;
+  if (r) r(value || '');
+}
+
+function describeError(res) {
+  const d = (res && res.data) || {};
+  const fields = Array.isArray(d.fields) && d.fields.length ? ` (${d.fields.join(', ')})` : '';
+  if (res && res.status === 0) return d.error || 'serveur injoignable';
+  if (res && res.status === 429) return 'trop d’écritures : réessayez dans une minute';
+  if (res && res.status === 412) return 'la topologie a été modifiée ailleurs, réessayez';
+  return (d.error || `erreur HTTP ${res && res.status}`) + fields;
+}
+
+/**
+ * One write path for every editor mutation: token, If-Match rev, one token
+ * prompt on 401, topology reload on 412.
+ */
+async function apiWrite(method, url, body, opts = {}) {
+  const headers = { accept: 'application/json', 'content-type': 'application/json' };
+  const token = storedToken();
+  if (token) headers.authorization = `Bearer ${token}`;
+  if (opts.rev !== false && state.rev !== null) headers['if-match'] = String(state.rev);
+
+  let res;
+  try {
+    res = await fetch(url, {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch {
+    return { ok: false, status: 0, data: { error: 'serveur injoignable' } };
+  }
+  let data = {};
+  try { data = await res.json(); } catch { /* corps vide */ }
+
+  if (res.status === 401 && opts.retry !== false) {
+    storeToken('');                       // the stored one was refused
+    const granted = await askToken();
+    if (granted) {
+      storeToken(granted);
+      return apiWrite(method, url, body, { ...opts, retry: false });
+    }
+    return { ok: false, status: 401, data: { error: 'unauthorized' } };
+  }
+  if (res.status === 412) {
+    try { await loadTopology(); } catch { /* the stream will refresh it */ }
+  }
+  if (res.ok && data.rev !== undefined) state.rev = data.rev;
+  return { ok: res.ok, status: res.status, data };
+}
+
+/* ------------------------------------------------------------ mode édition */
+
+function setEditMode(on) {
+  state.edit = Boolean(on);
+  for (const b of $('map-mode').querySelectorAll('button')) {
+    b.setAttribute('aria-pressed', String((b.dataset.mode === 'edit') === state.edit));
+  }
+  $('map-tools').hidden = !state.edit;
+  $('map-wrap').classList.toggle('editing', state.edit);
+  $('map-sub').textContent = state.edit
+    ? 'Mode édition : glissez pour déplacer, cliquez pour modifier, le cadenas verrouille la position'
+    : 'Cliquez sur un équipement pour ouvrir son tableau de bord';
+  if (!state.edit && state.grid) {
+    state.grid = false;
+    $('map-grid').checked = false;
+  }
+  mapBuilt = false;
+  mark('map');
+}
+
+function mapScale() {
+  const r = $('map').getBoundingClientRect();
+  const vb = state.mapVB || { w: 800, h: 300 };
+  return {
+    x: r.width > 0 ? vb.w / r.width : 1,
+    y: r.height > 0 ? vb.h / r.height : 1,
+  };
+}
+
+function markDragged() {
+  justDragged = true;
+  setTimeout(() => { justDragged = false; }, 120);
+}
+
+/* ---- drag & drop (Pointer Events, one save when the drop lands) */
+
+function startNodeDrag(ev, id) {
+  if (!state.edit) return;                      // view mode: let the map pan
+  if (ev.pointerType === 'mouse' && ev.button !== 0) return;
+  ev.stopPropagation();
+  const dev = state.devices.get(id);
+  const p = POS[id];
+  if (!dev || !p) return;
+  if (dev.layout && dev.layout.locked) return;  // only the padlock reacts
+  dragState = {
+    id, cx: ev.clientX, cy: ev.clientY, ox: p.x, oy: p.y, sc: mapScale(), moved: false,
+  };
+  $('map-wrap').classList.add('dragging');
+}
+
+function onMapPointerDown(ev) {
+  if (ev.pointerType === 'mouse' && ev.button !== 0) return;
+  activePointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+  if (activePointers.size === 2) {
+    const pts = [...activePointers.values()];
+    pinchState = {
+      dist: Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y),
+      cx: (pts[0].x + pts[1].x) / 2,
+      cy: (pts[0].y + pts[1].y) / 2,
+    };
+    panState = null;
+    return;
+  }
+  panState = { cx: ev.clientX, cy: ev.clientY, moved: false };
+}
+
+function onDocPointerMove(ev) {
+  if (activePointers.has(ev.pointerId)) activePointers.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+
+  if (dragState) {
+    const dx = (ev.clientX - dragState.cx) * dragState.sc.x;
+    const dy = (ev.clientY - dragState.cy) * dragState.sc.y;
+    if (!dragState.moved && Math.abs(dx) + Math.abs(dy) < 4) return;
+    dragState.moved = true;
+    let nx = dragState.ox + dx;
+    let ny = dragState.oy + dy;
+    if (state.grid) { nx = Math.round(nx / 20) * 20; ny = Math.round(ny / 20) * 20; }
+    nx = Math.max(-100000, Math.min(100000, Math.round(nx)));
+    ny = Math.max(-100000, Math.min(100000, Math.round(ny)));
+    POS[dragState.id].x = nx;
+    POS[dragState.id].y = ny;
+    const els = nodeEls.get(dragState.id);
+    if (els) els.g.setAttribute('transform', `translate(${nx} ${ny})`);
+    updateLinkGeometry();
+    return;
+  }
+
+  if (pinchState && activePointers.size >= 2) {
+    const pts = [...activePointers.values()];
+    const dist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+    if (pinchState.dist > 4 && dist > 4) zoomMap(pinchState.dist / dist, pinchState.cx, pinchState.cy);
+    pinchState.dist = dist;
+    return;
+  }
+
+  if (panState) {
+    const dx = ev.clientX - panState.cx;
+    const dy = ev.clientY - panState.cy;
+    if (!panState.moved && Math.abs(dx) + Math.abs(dy) < 4) return;
+    panState.moved = true;
+    panState.cx = ev.clientX;
+    panState.cy = ev.clientY;
+    panMap(dx, dy);
+  }
+}
+
+function onDocPointerUp(ev) {
+  activePointers.delete(ev.pointerId);
+  if (activePointers.size < 2) pinchState = null;
+
+  if (dragState) {
+    const { id, moved } = dragState;
+    dragState = null;
+    $('map-wrap').classList.remove('dragging');
+    if (!moved) return;
+    markDragged();
+    const p = POS[id];
+    const dev = state.devices.get(id);
+    persistPositions([{
+      id,
+      x: Math.round(p.x),
+      y: Math.round(p.y),
+      locked: Boolean(dev && dev.layout && dev.layout.locked),
+    }]);
+    return;
+  }
+  if (panState) {
+    const moved = panState.moved;
+    panState = null;
+    if (moved) markDragged();
+  }
+}
+
+/** One batched PUT for every position that moved; nothing is written twice. */
+async function persistPositions(entries) {
+  if (!entries.length) return;
+  const res = await apiWrite('PUT', '/api/topology/layout', { devices: entries });
+  if (res.ok) {
+    for (const e of entries) {
+      const d = state.devices.get(e.id);
+      if (d) d.layout = { x: e.x, y: e.y, locked: Boolean(e.locked) };
+    }
+    if (res.data && res.data.written === false) return;   // rien n'a changé
+    toast(`Position enregistrée (${entries.length})`);
+    return;
+  }
+  toast(`Position non enregistrée : ${describeError(res)}`, 'err');
+  try { await loadTopology(); } catch { /* the stream will refresh it */ }
+  mapBuilt = false;
+  mark('map');
+}
+
+async function toggleLock(id) {
+  const dev = state.devices.get(id);
+  if (!dev) return;
+  const p = POS[id] || { x: 0, y: 0 };
+  const locked = !(dev.layout && dev.layout.locked);
+  const res = await apiWrite('PUT', '/api/topology/layout', {
+    devices: [{ id, x: Math.round(p.x), y: Math.round(p.y), locked }],
+  });
+  if (!res.ok) { toast(`Position : ${describeError(res)}`, 'err'); return; }
+  dev.layout = { x: Math.round(p.x), y: Math.round(p.y), locked };
+  toast(locked ? `${dev.name} verrouillé` : `${dev.name} déverrouillé`);
+  mapBuilt = false;
+  mark('map');
+}
+
+/** Recompute the tree layout and store it in ONE batched write. */
+async function autoLayout() {
+  const devices = [...state.devices.values()];
+  if (!devices.length) return;
+  const saved = new Map(devices.map((d) => [d.id, d.layout]));
+  for (const d of devices) d.layout = null;          // ignore stored positions
+  const pos = computeLayout();
+  for (const d of devices) d.layout = saved.get(d.id);
+
+  const entries = [];
+  for (const d of devices) {
+    const p = pos[d.id];
+    if (!p) continue;
+    entries.push({
+      id: d.id,
+      x: Math.round(p.x),
+      y: Math.round(p.y),
+      locked: saved.get(d.id)?.locked === true,
+    });
+  }
+  await persistPositions(entries);
+  for (const e of entries) POS[e.id] = { ...(POS[e.id] || {}), x: e.x, y: e.y };
+  mapBuilt = false;
+  mark('map');
+}
+
+function onMapKeydown(ev) {
+  if (ev.target !== $('map')) return;               // nodes handle their own keys
+  const vb = state.mapVB;
+  if (!vb) return;
+  const step = Math.max(10, Math.round(vb.w / 20));
+  let handled = true;
+  switch (ev.key) {
+    case '+': case '=': zoomMap(1 / 1.25); break;
+    case '-': case '_': zoomMap(1.25); break;
+    case '0': fitMap(); break;
+    case 'ArrowLeft': panMap(step, 0); break;
+    case 'ArrowRight': panMap(-step, 0); break;
+    case 'ArrowUp': panMap(0, step); break;
+    case 'ArrowDown': panMap(0, -step); break;
+    default: handled = false;
+  }
+  if (handled) ev.preventDefault();
+}
+
+/* ------------------------------------------------------------ modal appareil */
+
+let deviceModalId = null;
+
+function slugify(value) {
+  return String(value)
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 48);
+}
+
+function uniqueDeviceId(name) {
+  const base = slugify(name) || 'equipement';
+  let id = base;
+  let n = 1;
+  while (state.devices.has(id)) { n += 1; id = `${base}-${n}`.slice(0, 64); }
+  return id;
+}
+
+/** Link ids are derived from both endpoints (max 64 chars, ID_RE safe). */
+function uniqueLinkId(a, b) {
+  const raw = `${a.device}-${a.port}-${b.device}-${b.port}`;
+  const base = (/^[A-Za-z0-9]/.test(raw) ? raw : `l-${raw}`).slice(0, 56);
+  let id = base;
+  let n = 1;
+  while (state.links.has(id)) { n += 1; id = `${base.slice(0, 58)}-${n}`; }
+  return id;
+}
+
+function openDeviceModal(id) {
+  const dev = id ? state.devices.get(id) : null;
+  deviceModalId = dev ? dev.id : null;
+  $('dev-title').textContent = dev ? `Modifier ${dev.name}` : 'Ajouter un équipement';
+  $('f-id').value = dev ? dev.id : '';
+  $('f-id').disabled = Boolean(dev);
+  $('f-name').value = dev ? dev.name : '';
+  $('f-type').value = dev ? dev.type : 'switch';
+  $('f-model').value = (dev && dev.model) || '';
+  $('f-host').value = (dev && dev.host) || '';
+  $('f-port').value = dev && dev.port ? String(dev.port) : '';
+  $('f-auth').value = (dev && dev.auth) || 'digest';
+  $('f-user').value = (dev && dev.username) || '';
+  $('f-pass').value = '';
+  $('f-interval').value = String(Math.max(1, Math.round(((dev && dev.intervalMs) || 3000) / 1000)));
+  $('f-ports-mode').value = (dev && dev.portsMode) || 'auto';
+  $('f-ports').value = (dev && Array.isArray(dev.ports) ? dev.ports : [])
+    .map((p) => `${p.index} ${p.name || ''} ${p.kind || 'ethernet'}`.replace(/\s+/g, ' ').trim())
+    .join('\n');
+  $('f-root').checked = Boolean(dev && dev.root) || (!dev && state.devices.size === 0);
+  $('f-enabled').checked = !dev || dev.enabled !== false;
+  $('f-tls').checked = Boolean(dev && dev.tls);
+  $('f-ports-wrap').hidden = $('f-ports-mode').value !== 'manual';
+  $('dev-error').hidden = true;
+  $('dev-test-result').hidden = true;
+  $('dev-del').hidden = !dev;
+  $('modal-device').hidden = false;
+  $('f-name').focus?.();
+}
+
+function collectCredentials() {
+  const username = $('f-user').value.trim();
+  const password = $('f-pass').value;
+  if (!username && !password) return null;    // blank = keep what is stored
+  return { username, password };
+}
+
+function collectDevice() {
+  const portsMode = $('f-ports-mode').value;
+  const ports = [];
+  if (portsMode === 'manual') {
+    for (const raw of $('f-ports').value.split('\n')) {
+      const line = raw.trim();
+      if (!line) continue;
+      const m = /^(\d{1,3})\s*(.*)$/.exec(line);
+      if (!m) continue;
+      const index = Number(m[1]);
+      if (!Number.isInteger(index) || index < 1 || index > 512) continue;
+      const rest = m[2].trim();
+      const kindMatch = /\s(ethernet|sfp)$/i.exec(rest);
+      const kind = kindMatch ? kindMatch[1].toLowerCase() : 'ethernet';
+      const name = (kindMatch ? rest.slice(0, kindMatch.index) : rest).trim() || null;
+      ports.push({ index, kind, name, speedBps: null });
+    }
+  }
+  const interval = Number($('f-interval').value);
+  const body = {
+    ...(deviceModalId ? {} : { id: $('f-id').value.trim() || uniqueDeviceId($('f-name').value.trim()) }),
+    type: $('f-type').value,
+    name: $('f-name').value.trim(),
+    model: $('f-model').value.trim() || null,
+    host: $('f-host').value.trim(),
+    port: Number($('f-port').value) || null,
+    tls: $('f-tls').checked,
+    auth: $('f-auth').value,
+    intervalMs: (Number.isFinite(interval) && interval >= 1 ? Math.round(interval) : 3) * 1000,
+    root: $('f-root').checked,
+    enabled: $('f-enabled').checked,
+    portsMode,
+    ports,
+  };
+  // Switching type switches the driver too (swos <-> routeros); otherwise the
+  // stored driver is left alone.
+  const original = deviceModalId ? state.devices.get(deviceModalId) : null;
+  if (original && original.type !== body.type) {
+    body.driver = body.type === 'router' ? 'routeros' : 'swos';
+  }
+  return body;
+}
+
+function showDevError(message) {
+  const box = $('dev-error');
+  box.textContent = message;
+  box.hidden = false;
+}
+
+async function saveDevice() {
+  const name = $('f-name').value.trim();
+  const host = $('f-host').value.trim();
+  $('dev-error').hidden = true;
+  if (!name) { showDevError('Le nom est requis.'); return; }
+  if (!host) { showDevError('L’adresse IP ou le hostname est requis.'); return; }
+
+  const body = collectDevice();
+  const credentials = collectCredentials();
+  if (credentials) body.credentials = credentials;
+
+  const isNew = !deviceModalId;
+  const url = isNew ? '/api/devices' : `/api/devices/${encodeURIComponent(deviceModalId)}`;
+  const res = await apiWrite(isNew ? 'POST' : 'PATCH', url, body);
+  if (res.ok) {
+    $('modal-device').hidden = true;
+    toast(isNew ? 'Équipement ajouté' : 'Équipement mis à jour');
+    mapBuilt = false;
+    mark('map');
+    return;
+  }
+  showDevError(describeError(res));
+}
+
+async function deleteDevice() {
+  const dev = state.devices.get(deviceModalId);
+  if (!dev) return;
+  const touching = [...state.links.values()]
+    .filter((l) => l.a.device === dev.id || l.b.device === dev.id).length;
+  const ok = await confirmDialog(
+    'Supprimer l’équipement',
+    `Supprimer « ${dev.name} » ? ${touching ? `${touching} lien(s) seront aussi supprimés. ` : ''}Son historique sera effacé.`,
+    'Supprimer',
+  );
+  if (!ok) return;
+  const res = await apiWrite('DELETE', `/api/devices/${encodeURIComponent(dev.id)}`);
+  if (res.ok) {
+    $('modal-device').hidden = true;
+    toast('Équipement supprimé');
+    mapBuilt = false;
+    mark('map');
+    return;
+  }
+  showDevError(describeError(res));
+}
+
+async function testDevice() {
+  const btn = $('dev-test');
+  const out = $('dev-test-result');
+  btn.disabled = true;
+  out.hidden = false;
+  out.className = 'fmsg';
+  out.textContent = 'Test en cours…';
+
+  const isNew = !deviceModalId;
+  const payload = isNew ? { device: collectDevice() } : { id: deviceModalId };
+  const credentials = collectCredentials();
+  if (credentials) payload.credentials = credentials;
+
+  const res = await apiWrite('POST', '/api/devices/test', payload, { rev: false });
+  btn.disabled = false;
+  if (res.ok) {
+    const d = res.data || {};
+    const sys = d.system || {};
+    out.className = 'fmsg ok';
+    out.textContent = `Connexion réussie en ${d.latencyMs ?? '?'} ms`
+      + (sys.identity ? ` — ${sys.identity}` : '')
+      + (d.portCount ? ` — ${d.portCount} ports` : '')
+      + (d.mode ? ` (${d.mode})` : '');
+    return;
+  }
+  out.className = 'fmsg err';
+  out.textContent = `Échec : ${describeError(res)}`;
+}
+
+/* -------------------------------------------------------------- modal lien */
+
+let linkModalId = null;
+
+function portChoices(devId) {
+  const out = [];
+  const live = state.live.get(devId);
+  if (live && Array.isArray(live.ports)) {
+    for (const p of live.ports) out.push({ index: p.port, name: p.name || `Port${p.port}` });
+  }
+  const dev = state.devices.get(devId);
+  if (!out.length && dev && Array.isArray(dev.ports)) {
+    for (const p of dev.ports) out.push({ index: p.index, name: p.name || `Port${p.index}` });
+  }
+  return out.sort((a, b) => a.index - b.index);
+}
+
+/** Known ports -> select, unknown device -> numeric input (never invented). */
+function renderPortPicker(container, devId, selected) {
+  container.replaceChildren();
+  const choices = portChoices(devId);
+  let node;
+  if (choices.length) {
+    node = document.createElement('select');
+    for (const c of choices) {
+      const opt = document.createElement('option');
+      opt.value = String(c.index);
+      opt.textContent = `${c.name} (port ${c.index})`;
+      node.append(opt);
+    }
+    container.dataset.mode = 'select';
+  } else {
+    node = document.createElement('input');
+    node.type = 'number';
+    node.min = '1';
+    node.max = '512';
+    node.placeholder = 'numéro du port';
+    container.dataset.mode = 'number';
+  }
+  if (selected) node.value = String(selected);
+  container.append(node);
+}
+
+function portPickerValue(container) {
+  const node = container.firstElementChild;
+  if (!node) return null;
+  const v = Number(node.value);
+  return Number.isInteger(v) && v >= 1 && v <= 512 ? v : null;
+}
+
+async function ensurePorts(devId) {
+  if (!devId || state.live.has(devId)) return;
+  await fetchDeviceStats(devId);
+}
+
+async function openLinkModal(id, presetA, presetB) {
+  linkModalId = id || null;
+  const link = id ? state.links.get(id) : null;
+  $('lnk-title').textContent = link ? 'Modifier le lien' : 'Nouveau lien';
+  $('lnk-error').hidden = true;
+  $('lnk-del').hidden = !link;
+
+  const devices = [...state.devices.values()];
+  if (!devices.length) { toast('Ajoutez d’abord un équipement', 'err'); return; }
+  const fill = (sel, value) => {
+    sel.replaceChildren();
+    for (const d of devices) {
+      const opt = document.createElement('option');
+      opt.value = d.id;
+      opt.textContent = `${d.name} (${d.host || 'sans IP'})`;
+      sel.append(opt);
+    }
+    if (value && devices.some((d) => d.id === value)) sel.value = value;
+  };
+  const root = devices.find((d) => d.root) || devices[0];
+  const other = devices.find((d) => d.id !== root.id);
+  fill($('lnk-a-dev'), link ? link.a.device : (presetA || root.id));
+  fill($('lnk-b-dev'), link ? link.b.device : (presetB || (other ? other.id : root.id)));
+  $('lnk-label').value = (link && link.label) || '';
+  $('lnk-cap').value = link && link.capacityBps ? String(Math.round(link.capacityBps / 1e6)) : '';
+
+  $('modal-link').hidden = false;
+  await Promise.all([ensurePorts($('lnk-a-dev').value), ensurePorts($('lnk-b-dev').value)]);
+  renderPortPicker($('lnk-a-port'), $('lnk-a-dev').value, link ? link.a.port : null);
+  renderPortPicker($('lnk-b-port'), $('lnk-b-dev').value, link ? link.b.port : null);
+}
+
+function showLnkError(message) {
+  const box = $('lnk-error');
+  box.textContent = message;
+  box.hidden = false;
+}
+
+async function onLinkDeviceChange(side) {
+  const devId = $(`lnk-${side}-dev`).value;
+  renderPortPicker($(`lnk-${side}-port`), devId, null);
+  if (!state.live.has(devId)) {
+    await ensurePorts(devId);
+    renderPortPicker($(`lnk-${side}-port`), devId, null);
+  }
+}
+
+async function saveLink() {
+  $('lnk-error').hidden = true;
+  const isNew = !linkModalId;
+  const a = { device: $('lnk-a-dev').value, port: portPickerValue($('lnk-a-port')) };
+  const b = { device: $('lnk-b-dev').value, port: portPickerValue($('lnk-b-port')) };
+  if (!a.device || !b.device) { showLnkError('Choisissez deux équipements.'); return; }
+  if (!a.port || !b.port) { showLnkError('Choisissez un port sur chaque équipement.'); return; }
+  if (a.device === b.device && a.port === b.port) {
+    showLnkError('Les deux extrémités sont identiques.');
+    return;
+  }
+  const capacity = Number($('lnk-cap').value);
+  const body = {
+    a,
+    b,
+    label: $('lnk-label').value.trim() || null,
+    capacityBps: Number.isFinite(capacity) && capacity > 0 ? Math.round(capacity * 1e6) : null,
+  };
+  // The API needs an id on creation: derive it from the two endpoints so a
+  // recreated link keeps a stable, readable identifier.
+  if (isNew) body.id = uniqueLinkId(a, b);
+  const url = isNew ? '/api/links' : `/api/links/${encodeURIComponent(linkModalId)}`;
+  const res = await apiWrite(isNew ? 'POST' : 'PATCH', url, body);
+  if (res.ok) {
+    $('modal-link').hidden = true;
+    toast(isNew ? 'Lien créé' : 'Lien mis à jour');
+    mapBuilt = false;
+    mark('map');
+    return;
+  }
+  showLnkError(describeError(res));
+}
+
+async function deleteLink() {
+  const link = state.links.get(linkModalId);
+  if (!link) return;
+  const a = deviceName(link.a.device);
+  const b = deviceName(link.b.device);
+  const ok = await confirmDialog('Supprimer le lien', `Supprimer le lien ${a} ↔ ${b} ?`, 'Supprimer');
+  if (!ok) return;
+  const res = await apiWrite('DELETE', `/api/links/${encodeURIComponent(link.id)}`);
+  if (res.ok) {
+    $('modal-link').hidden = true;
+    toast('Lien supprimé');
+    mapBuilt = false;
+    mark('map');
+    return;
+  }
+  showLnkError(describeError(res));
 }
 
 /* ------------------------------------------------------------- navigation */
